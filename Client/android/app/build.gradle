@@ -1,0 +1,153 @@
+/*
+ * MTA:SA Android - App Build Script
+ *
+ * Module-level Gradle configuration for the MTA Android client.
+ */
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.mtasa.android'
+    compileSdk rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        applicationId "com.mtasa.android"
+        minSdk rootProject.ext.minSdkVersion
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName rootProject.ext.mtaVersionString
+
+        // NDK configuration
+        ndk {
+            // Build for ARM architectures
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+
+        // CMake arguments
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -fexceptions -frtti"
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DANDROID_TOOLCHAIN=clang",
+                          "-DMTA_ANDROID=ON"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+            minifyEnabled false
+
+            // Debug native build
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Debug"
+                }
+            }
+        }
+
+        release {
+            debuggable false
+            jniDebuggable false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            // Release native build
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Release"
+                }
+            }
+        }
+    }
+
+    // Native build configuration
+    externalNativeBuild {
+        cmake {
+            path file("../CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
+    // NDK version
+    ndkVersion rootProject.ext.ndkVersion
+
+    // Source sets
+    sourceSets {
+        main {
+            java.srcDirs = ['../java']
+            manifest.srcFile '../AndroidManifest.xml'
+            res.srcDirs = ['../res']
+            assets.srcDirs = ['../assets']
+        }
+    }
+
+    // Packaging options
+    packagingOptions {
+        // Keep debug symbols for crash reporting
+        doNotStrip "**/*.so"
+
+        // Exclude unnecessary files
+        exclude 'META-INF/DEPENDENCIES'
+        exclude 'META-INF/LICENSE'
+        exclude 'META-INF/LICENSE.txt'
+        exclude 'META-INF/NOTICE'
+        exclude 'META-INF/NOTICE.txt'
+    }
+
+    // Lint options
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    // Compile options
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // Split APKs by ABI for smaller downloads
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a'
+            universalApk true
+        }
+    }
+
+    // APK naming
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            def abi = output.getFilter(com.android.build.OutputFile.ABI)
+            if (abi == null) {
+                abi = "universal"
+            }
+            outputFileName = "mta-android-${variant.versionName}-${variant.buildType.name}-${abi}.apk"
+        }
+    }
+}
+
+dependencies {
+    // AndroidX core
+    implementation("androidx.core:core:${rootProject.ext.androidxCoreVersion}") {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+    }
+    implementation("androidx.appcompat:appcompat:${rootProject.ext.androidxAppCompatVersion}") {
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+    }
+}
+
+// Task to copy native libraries for debugging
+task copyNativeLibs(type: Copy) {
+    from fileTree(dir: "${buildDir}/intermediates/cmake/debug/obj", include: '**/*.so')
+    into "${buildDir}/native-libs"
+}

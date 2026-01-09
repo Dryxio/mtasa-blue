@@ -1,0 +1,35 @@
+/*
+ * MTA:SA Android - Root Build Script
+ *
+ * Project-level Gradle configuration.
+ */
+
+plugins {
+    id 'com.android.application' version '8.7.3' apply false
+}
+
+// Clean task
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}
+
+// Version information
+ext {
+    // MTA version
+    mtaVersionMajor = 1
+    mtaVersionMinor = 6
+    mtaVersionPatch = 0
+    mtaVersionString = "${mtaVersionMajor}.${mtaVersionMinor}.${mtaVersionPatch}-android"
+
+    // SDK versions
+    minSdkVersion = 24
+    targetSdkVersion = 34
+    compileSdkVersion = 34
+
+    // NDK version
+    ndkVersion = "26.1.10909125"
+
+    // Dependencies versions
+    androidxCoreVersion = "1.12.0"
+    androidxAppCompatVersion = "1.6.1"
+}
