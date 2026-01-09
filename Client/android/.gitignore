@@ -1,0 +1,25 @@
+# Build outputs
+build/
+app/build/
+app/.cxx/
+.gradle/
+.idea/
+
+# Local configuration
+local.properties
+
+# Output APKs and decompiled files (copyrighted game content)
+output/
+
+# Reference repositories (external)
+reference/
+
+# IDE
+*.iml
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
