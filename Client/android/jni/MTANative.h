@@ -217,6 +217,52 @@ JNIEXPORT jstring JNICALL Java_com_mtasa_android_MTANative_nativeGetBuildDate(
     JNIEnv* env, jobject obj);
 
 //=============================================================================
+// Server Connection Testing (Phase 7)
+//=============================================================================
+
+/**
+ * Test connectivity to an MTA server
+ */
+JNIEXPORT jboolean JNICALL Java_com_mtasa_android_MTANative_testServerConnectivity(
+    JNIEnv* env, jclass clazz, jstring host, jint port, jint timeoutMs);
+
+/**
+ * Test DNS resolution
+ */
+JNIEXPORT jstring JNICALL Java_com_mtasa_android_MTANative_testDNSResolution(
+    JNIEnv* env, jclass clazz, jstring hostname);
+
+/**
+ * Get connection test results as JSON
+ */
+JNIEXPORT jstring JNICALL Java_com_mtasa_android_MTANative_getConnectionTestResults(
+    JNIEnv* env, jclass clazz);
+
+/**
+ * Connect to an MTA server
+ */
+JNIEXPORT jboolean JNICALL Java_com_mtasa_android_MTANative_connectToServer(
+    JNIEnv* env, jclass clazz, jstring host, jint port, jstring nickname, jstring password);
+
+/**
+ * Disconnect from current server
+ */
+JNIEXPORT void JNICALL Java_com_mtasa_android_MTANative_disconnectFromServer(
+    JNIEnv* env, jclass clazz);
+
+/**
+ * Get server connection state
+ */
+JNIEXPORT jint JNICALL Java_com_mtasa_android_MTANative_getServerConnectionState(
+    JNIEnv* env, jclass clazz);
+
+/**
+ * Process server connection (call in main loop)
+ */
+JNIEXPORT void JNICALL Java_com_mtasa_android_MTANative_processServerConnection(
+    JNIEnv* env, jclass clazz);
+
+//=============================================================================
 // Callbacks from Native to Java
 //=============================================================================
 

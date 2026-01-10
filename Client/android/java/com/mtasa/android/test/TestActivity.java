@@ -26,6 +26,8 @@ import android.widget.TextView;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import com.mtasa.android.MTANative;
+
 public class TestActivity extends Activity {
     private static final String TAG = "MTA-TestActivity";
 
@@ -123,6 +125,11 @@ public class TestActivity extends Activity {
         Button quickTestButton = createButton("Quick Test", 0xFF2196F3);
         quickTestButton.setOnClickListener(v -> runQuickTest());
         root.addView(quickTestButton);
+
+        // Server Connection Test button
+        Button serverTestButton = createButton("Test Server Connection", 0xFFFF9800);
+        serverTestButton.setOnClickListener(v -> runServerConnectionTest());
+        root.addView(serverTestButton);
 
         // Category buttons container
         TextView categoryLabel = new TextView(this);
@@ -337,5 +344,124 @@ public class TestActivity extends Activity {
             categoryButtons.getChildAt(i).setEnabled(!running);
         }
         progressBar.setVisibility(running ? View.VISIBLE : View.GONE);
+    }
+
+    private void runServerConnectionTest() {
+        // Test server: VPS with MTA server
+        final String serverHost = "37.59.101.35";
+        final int serverPort = 22004;
+
+        setRunning(true);
+        statusText.setText("Testing server connection...");
+        statusText.setTextColor(0xFFFFEB3B);
+        resultsText.setText("Connecting to " + serverHost + ":" + serverPort + "...\n");
+
+        executor.execute(() -> {
+            StringBuilder results = new StringBuilder();
+            results.append("=== Server Connection Test ===\n\n");
+            results.append("Target: ").append(serverHost).append(":").append(serverPort).append("\n\n");
+
+            try {
+                // Test 1: DNS Resolution
+                results.append("1. DNS Resolution:\n");
+                long startTime = System.currentTimeMillis();
+                String resolvedIP = MTANative.testDNSResolution(serverHost);
+                long dnsTime = System.currentTimeMillis() - startTime;
+                if (resolvedIP != null && !resolvedIP.isEmpty()) {
+                    results.append("   ✓ Resolved to: ").append(resolvedIP).append(" (").append(dnsTime).append("ms)\n\n");
+                } else {
+                    results.append("   ✗ DNS resolution failed\n\n");
+                }
+
+                // Test 2: UDP Connectivity
+                results.append("2. UDP Connectivity:\n");
+                startTime = System.currentTimeMillis();
+                boolean reachable = MTANative.testServerConnectivity(serverHost, serverPort, 5000);
+                long connectTime = System.currentTimeMillis() - startTime;
+                if (reachable) {
+                    results.append("   ✓ Server reachable (").append(connectTime).append("ms)\n\n");
+                } else {
+                    results.append("   ✗ Server not reachable (timeout after ").append(connectTime).append("ms)\n\n");
+                }
+
+                // Test 3: Get detailed results
+                results.append("3. Detailed Results:\n");
+                String jsonResults = MTANative.getConnectionTestResults();
+                if (jsonResults != null && !jsonResults.isEmpty()) {
+                    results.append("   ").append(jsonResults.replace(",", ",\n   ")).append("\n\n");
+                }
+
+                // Test 4: Try actual connection
+                results.append("4. MTA Protocol Connection:\n");
+                boolean connected = MTANative.connectToServer(serverHost, serverPort, "AndroidTest", "");
+                if (connected) {
+                    results.append("   ✓ Connection initiated\n");
+
+                    // Wait for connection with timeout
+                    int maxWait = 10;
+                    for (int i = 0; i < maxWait; i++) {
+                        Thread.sleep(1000);
+                        MTANative.processServerConnection();
+                        int state = MTANative.getServerConnectionState();
+                        results.append("   State: ").append(getStateName(state)).append("\n");
+
+                        if (state == 7) { // CONNECTED
+                            results.append("   ✓ Successfully connected to server!\n");
+                            break;
+                        } else if (state == 9) { // ERROR_STATE
+                            results.append("   ✗ Connection error\n");
+                            break;
+                        }
+                    }
+
+                    // Disconnect
+                    MTANative.disconnectFromServer();
+                    results.append("   Disconnected\n");
+                } else {
+                    results.append("   ✗ Failed to initiate connection\n");
+                }
+
+                final String finalResults = results.toString();
+                final boolean success = reachable;
+                mainHandler.post(() -> {
+                    setRunning(false);
+                    if (success) {
+                        statusText.setText("Server connection test completed");
+                        statusText.setTextColor(0xFF4CAF50);
+                    } else {
+                        statusText.setText("Server connection test failed");
+                        statusText.setTextColor(0xFFF44336);
+                    }
+                    resultsText.setText(finalResults);
+                });
+
+            } catch (Exception e) {
+                final String error = e.getMessage();
+                results.append("\nError: ").append(error).append("\n");
+                final String finalResults = results.toString();
+                mainHandler.post(() -> {
+                    setRunning(false);
+                    statusText.setText("Test error: " + error);
+                    statusText.setTextColor(0xFFF44336);
+                    resultsText.setText(finalResults);
+                });
+            }
+        });
+    }
+
+    private String getStateName(int state) {
+        switch (state) {
+            case 0: return "DISCONNECTED";
+            case 1: return "RESOLVING_DNS";
+            case 2: return "CONNECTING";
+            case 3: return "WAIT_MOD_NAME";
+            case 4: return "SENDING_JOIN";
+            case 5: return "WAIT_JOIN_COMPLETE";
+            case 6: return "WAIT_JOINED_GAME";
+            case 7: return "CONNECTED";
+            case 8: return "DISCONNECTING";
+            case 9: return "ERROR_STATE";
+            default: return "UNKNOWN(" + state + ")";
+        }
     }
 }

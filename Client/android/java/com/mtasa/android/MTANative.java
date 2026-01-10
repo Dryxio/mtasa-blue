@@ -253,4 +253,58 @@ public class MTANative {
      * @return true if game library is ready
      */
     public static native boolean isGameLibraryReady();
+
+    // =========================================================================
+    // Server Connection Testing (Phase 7)
+    // =========================================================================
+
+    /**
+     * Test connectivity to an MTA server
+     * @param host Server hostname or IP
+     * @param port Server port
+     * @param timeoutMs Timeout in milliseconds
+     * @return true if server is reachable
+     */
+    public static native boolean testServerConnectivity(String host, int port, int timeoutMs);
+
+    /**
+     * Test DNS resolution
+     * @param hostname Hostname to resolve
+     * @return Resolved IP address or empty string on failure
+     */
+    public static native String testDNSResolution(String hostname);
+
+    /**
+     * Get connection test results as JSON
+     * @return JSON string with test results
+     */
+    public static native String getConnectionTestResults();
+
+    /**
+     * Connect to an MTA server
+     * @param host Server hostname or IP
+     * @param port Server port
+     * @param nickname Player nickname
+     * @param password Server password (empty if none)
+     * @return true if connection attempt started
+     */
+    public static native boolean connectToServer(String host, int port, String nickname, String password);
+
+    /**
+     * Disconnect from current server
+     */
+    public static native void disconnectFromServer();
+
+    /**
+     * Get server connection state
+     * @return State: 0=DISCONNECTED, 1=RESOLVING_DNS, 2=CONNECTING, 3=WAIT_MOD_NAME,
+     *         4=SENDING_JOIN, 5=WAIT_JOIN_COMPLETE, 6=WAIT_JOINED_GAME, 7=CONNECTED,
+     *         8=DISCONNECTING, 9=ERROR_STATE
+     */
+    public static native int getServerConnectionState();
+
+    /**
+     * Process server connection (call in main loop)
+     */
+    public static native void processServerConnection();
 }
