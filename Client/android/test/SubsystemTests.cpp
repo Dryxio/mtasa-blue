@@ -13,6 +13,7 @@
 #include "../signatures/SignatureScanner.h"
 #include "../network/CNetAndroid.h"
 #include "../network/SyncStructures.h"
+#include "../network/CServerConnection.h"
 
 #include <cstring>
 #include <thread>
@@ -945,6 +946,70 @@ TestResult Test_CNetAndroid_BitStreamAlloc()
     return TestPass();
 }
 
+//=============================================================================
+// Server Connection Tests
+//=============================================================================
+
+TestResult Test_ServerConnection_Initialize()
+{
+    CServerConnection conn;
+    ASSERT_TRUE(conn.Initialize(), "Failed to initialize CServerConnection");
+    ASSERT_TRUE(conn.GetState() == ServerConnectionState::DISCONNECTED, "Should start disconnected");
+    conn.Shutdown();
+    TEST_LOG("  CServerConnection initialized: OK");
+    return TestPass();
+}
+
+TestResult Test_ServerConnection_DNS()
+{
+    CServerConnection conn;
+    conn.Initialize();
+
+    // Test DNS resolution
+    std::string ip = conn.TestDNSResolution("mtasa.com");
+    ASSERT_FALSE(ip.empty(), "Failed to resolve mtasa.com");
+    TEST_LOG("  mtasa.com -> %s", ip.c_str());
+
+    // Test IP passthrough
+    std::string ipDirect = conn.TestDNSResolution("8.8.8.8");
+    ASSERT_TRUE(ipDirect == "8.8.8.8", "IP passthrough failed");
+
+    conn.Shutdown();
+    return TestPass();
+}
+
+TestResult Test_ServerConnection_MD5()
+{
+    // Test MD5 hash computation
+    uint8_t hash[16];
+    MD5::Compute("test", hash);
+
+    // MD5("test") = 098f6bcd4621d373cade4e832627b4f6
+    ASSERT_TRUE(hash[0] == 0x09, "MD5 hash byte 0 mismatch");
+    ASSERT_TRUE(hash[1] == 0x8f, "MD5 hash byte 1 mismatch");
+    ASSERT_TRUE(hash[2] == 0x6b, "MD5 hash byte 2 mismatch");
+    ASSERT_TRUE(hash[3] == 0xcd, "MD5 hash byte 3 mismatch");
+
+    TEST_LOG("  MD5 hash: OK");
+    return TestPass();
+}
+
+TestResult Test_ServerConnection_StateTransitions()
+{
+    CServerConnection conn;
+    conn.Initialize();
+
+    ASSERT_TRUE(conn.GetState() == ServerConnectionState::DISCONNECTED, "Initial state wrong");
+    ASSERT_TRUE(std::string(CServerConnection::StateToString(ServerConnectionState::DISCONNECTED)) == "DISCONNECTED",
+                "StateToString failed");
+    ASSERT_TRUE(std::string(CServerConnection::StateToString(ServerConnectionState::CONNECTED)) == "CONNECTED",
+                "StateToString failed for CONNECTED");
+
+    conn.Shutdown();
+    TEST_LOG("  State transitions: OK");
+    return TestPass();
+}
+
 } // anonymous namespace
 
 //=============================================================================
@@ -1021,6 +1086,12 @@ struct TestRegistration
 
         harness.RegisterTest("Initialize", "CNetAndroid", Test_CNetAndroid_Initialize);
         harness.RegisterTest("BitStreamAlloc", "CNetAndroid", Test_CNetAndroid_BitStreamAlloc);
+
+        // Server Connection tests (Phase 7)
+        harness.RegisterTest("Initialize", "ServerConnection", Test_ServerConnection_Initialize);
+        harness.RegisterTest("DNS", "ServerConnection", Test_ServerConnection_DNS);
+        harness.RegisterTest("MD5", "ServerConnection", Test_ServerConnection_MD5);
+        harness.RegisterTest("StateTransitions", "ServerConnection", Test_ServerConnection_StateTransitions);
 
         TEST_LOG("Registered %zu tests", harness.GetTestCount());
     }

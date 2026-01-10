@@ -189,6 +189,8 @@ set(NETWORK_SOURCES
     ${ANDROID_NETWORK_DIR}/CPacketHandler.h
     ${ANDROID_NETWORK_DIR}/CPacketHandler.cpp
     ${ANDROID_NETWORK_DIR}/SyncStructures.h
+    ${ANDROID_NETWORK_DIR}/CServerConnection.h
+    ${ANDROID_NETWORK_DIR}/CServerConnection.cpp
 )
 
 # =============================================================================

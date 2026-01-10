@@ -6,9 +6,11 @@
 #include "../platform/AndroidInput.h"
 #include "../platform/AndroidFileSystem.h"
 #include "../platform/AndroidNetwork.h"
+#include "../network/CServerConnection.h"
 
 #include <cstring>
 #include <cstdlib>
+#include <memory>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -438,6 +440,121 @@ JNIEXPORT jboolean JNICALL Java_com_mtasa_android_MTANative_isGameLibraryReady(
     JNIEnv* env, jclass clazz)
 {
     return MTA::Android::GTASA::IsReady() ? JNI_TRUE : JNI_FALSE;
+}
+
+//=============================================================================
+// Server Connection Testing (Phase 7)
+//=============================================================================
+
+// Static connection instance for testing
+static std::unique_ptr<MTA::Android::Network::CServerConnection> g_ServerConnection;
+
+JNIEXPORT jboolean JNICALL Java_com_mtasa_android_MTANative_testServerConnectivity(
+    JNIEnv* env, jclass clazz, jstring host, jint port, jint timeoutMs)
+{
+    const char* hostStr = env->GetStringUTFChars(host, nullptr);
+    LOGI("Testing connectivity to %s:%d", hostStr, port);
+
+    if (!g_ServerConnection)
+    {
+        g_ServerConnection = std::make_unique<MTA::Android::Network::CServerConnection>();
+        g_ServerConnection->Initialize();
+    }
+
+    bool result = g_ServerConnection->TestConnectivity(hostStr, static_cast<uint16_t>(port),
+                                                       static_cast<uint32_t>(timeoutMs));
+
+    env->ReleaseStringUTFChars(host, hostStr);
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL Java_com_mtasa_android_MTANative_testDNSResolution(
+    JNIEnv* env, jclass clazz, jstring hostname)
+{
+    const char* hostnameStr = env->GetStringUTFChars(hostname, nullptr);
+
+    if (!g_ServerConnection)
+    {
+        g_ServerConnection = std::make_unique<MTA::Android::Network::CServerConnection>();
+        g_ServerConnection->Initialize();
+    }
+
+    std::string ip = g_ServerConnection->TestDNSResolution(hostnameStr);
+
+    env->ReleaseStringUTFChars(hostname, hostnameStr);
+    return env->NewStringUTF(ip.c_str());
+}
+
+JNIEXPORT jstring JNICALL Java_com_mtasa_android_MTANative_getConnectionTestResults(
+    JNIEnv* env, jclass clazz)
+{
+    if (!g_ServerConnection)
+    {
+        return env->NewStringUTF("{}");
+    }
+
+    std::string results = g_ServerConnection->GetConnectionTestResults();
+    return env->NewStringUTF(results.c_str());
+}
+
+JNIEXPORT jboolean JNICALL Java_com_mtasa_android_MTANative_connectToServer(
+    JNIEnv* env, jclass clazz, jstring host, jint port, jstring nickname, jstring password)
+{
+    const char* hostStr = env->GetStringUTFChars(host, nullptr);
+    const char* nickStr = env->GetStringUTFChars(nickname, nullptr);
+    const char* passStr = password ? env->GetStringUTFChars(password, nullptr) : "";
+
+    LOGI("Connecting to server %s:%d as '%s'", hostStr, port, nickStr);
+
+    if (!g_ServerConnection)
+    {
+        g_ServerConnection = std::make_unique<MTA::Android::Network::CServerConnection>();
+        g_ServerConnection->Initialize();
+    }
+
+    MTA::Android::Network::ServerInfo serverInfo;
+    serverInfo.host = hostStr;
+    serverInfo.port = static_cast<uint16_t>(port);
+
+    MTA::Android::Network::PlayerInfo playerInfo;
+    playerInfo.nickname = nickStr;
+    playerInfo.password = passStr;
+
+    bool result = g_ServerConnection->Connect(serverInfo, playerInfo);
+
+    env->ReleaseStringUTFChars(host, hostStr);
+    env->ReleaseStringUTFChars(nickname, nickStr);
+    if (password) env->ReleaseStringUTFChars(password, passStr);
+
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_com_mtasa_android_MTANative_disconnectFromServer(
+    JNIEnv* env, jclass clazz)
+{
+    if (g_ServerConnection)
+    {
+        g_ServerConnection->Disconnect("User request");
+    }
+}
+
+JNIEXPORT jint JNICALL Java_com_mtasa_android_MTANative_getServerConnectionState(
+    JNIEnv* env, jclass clazz)
+{
+    if (!g_ServerConnection)
+    {
+        return 0;  // DISCONNECTED
+    }
+    return static_cast<jint>(g_ServerConnection->GetState());
+}
+
+JNIEXPORT void JNICALL Java_com_mtasa_android_MTANative_processServerConnection(
+    JNIEnv* env, jclass clazz)
+{
+    if (g_ServerConnection)
+    {
+        g_ServerConnection->Process();
+    }
 }
 
 //=============================================================================
