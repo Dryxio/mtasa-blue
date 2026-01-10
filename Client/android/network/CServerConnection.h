@@ -12,6 +12,7 @@
 
 #include "CNetAndroid.h"
 #include "CPacketHandler.h"
+#include "raknet/RakNetHandshake.h"
 #include <string>
 #include <functional>
 #include <memory>
@@ -30,7 +31,8 @@ enum class ServerConnectionState
 {
     DISCONNECTED,       // Not connected
     RESOLVING_DNS,      // Resolving server hostname
-    CONNECTING,         // Sending connection request
+    CONNECTING,         // Creating socket
+    RAKNET_HANDSHAKE,   // Performing RakNet handshake
     WAIT_MOD_NAME,      // Waiting for MOD_NAME packet
     SENDING_JOIN,       // Sending join data
     WAIT_JOIN_COMPLETE, // Waiting for join complete
@@ -204,6 +206,7 @@ private:
     // State handlers
     void ProcessResolvingDNS();
     void ProcessConnecting();
+    void ProcessRakNetHandshake();
     void ProcessWaitModName();
     void ProcessSendingJoin();
     void ProcessWaitJoinComplete();
@@ -218,6 +221,7 @@ private:
     void HandleJoinCompletePacket(NetBitStream& bitStream);
     void HandleJoinedGamePacket(NetBitStream& bitStream);
 
+    void SendConnectionRequest();
     void SendJoinDataPacket();
     void SendDisconnectPacket();
 
@@ -245,6 +249,9 @@ private:
     // Network (use singleton reference, not owning pointer)
     CNetAndroid* m_network = nullptr;
     int m_socket = -1;
+
+    // RakNet handshake
+    std::unique_ptr<RakNet::RakNetHandshake> m_raknetHandshake;
 
     // Timing
     uint64_t m_stateStartTime = 0;

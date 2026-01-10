@@ -308,6 +308,7 @@ const char* CServerConnection::StateToString(ServerConnectionState state)
         case ServerConnectionState::DISCONNECTED:       return "DISCONNECTED";
         case ServerConnectionState::RESOLVING_DNS:      return "RESOLVING_DNS";
         case ServerConnectionState::CONNECTING:         return "CONNECTING";
+        case ServerConnectionState::RAKNET_HANDSHAKE:   return "RAKNET_HANDSHAKE";
         case ServerConnectionState::WAIT_MOD_NAME:      return "WAIT_MOD_NAME";
         case ServerConnectionState::SENDING_JOIN:       return "SENDING_JOIN";
         case ServerConnectionState::WAIT_JOIN_COMPLETE: return "WAIT_JOIN_COMPLETE";
@@ -315,7 +316,7 @@ const char* CServerConnection::StateToString(ServerConnectionState state)
         case ServerConnectionState::CONNECTED:          return "CONNECTED";
         case ServerConnectionState::DISCONNECTING:      return "DISCONNECTING";
         case ServerConnectionState::ERROR_STATE:        return "ERROR";
-        default:                                  return "UNKNOWN";
+        default:                                        return "UNKNOWN";
     }
 }
 
@@ -431,6 +432,10 @@ void CServerConnection::ProcessState()
             ProcessConnecting();
             break;
 
+        case ServerConnectionState::RAKNET_HANDSHAKE:
+            ProcessRakNetHandshake();
+            break;
+
         case ServerConnectionState::WAIT_MOD_NAME:
             ProcessWaitModName();
             break;
@@ -523,14 +528,110 @@ void CServerConnection::ProcessConnecting()
         setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, &recvBufSize, sizeof(recvBufSize));
     }
 
-    // For now, move to waiting for MOD_NAME
-    // In a full implementation, we would send a RakNet OPEN_CONNECTION_REQUEST here
-    LOGI("Socket created, waiting for server response");
-    SetState(ServerConnectionState::WAIT_MOD_NAME, "Awaiting server");
+    // Create server address for handshake
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(m_serverInfo.port);
+    inet_pton(AF_INET, m_resolvedIP.c_str(), &serverAddr.sin_addr);
+
+    // Create RakNet handshake and start it
+    m_raknetHandshake = std::make_unique<RakNet::RakNetHandshake>();
+    if (!m_raknetHandshake->Start(m_socket, serverAddr))
+    {
+        LOGE("Failed to start RakNet handshake");
+        SetState(ServerConnectionState::ERROR_STATE, "RakNet handshake start failed");
+        return;
+    }
+
+    LOGI("Socket created, starting RakNet handshake");
+    SetState(ServerConnectionState::RAKNET_HANDSHAKE, "RakNet handshake");
+}
+
+void CServerConnection::ProcessRakNetHandshake()
+{
+    if (!m_raknetHandshake)
+    {
+        LOGE("RakNet handshake not initialized");
+        SetState(ServerConnectionState::ERROR_STATE, "Internal error");
+        return;
+    }
+
+    // Process handshake state machine
+    RakNet::HandshakeState state = m_raknetHandshake->Process();
+
+    switch (state)
+    {
+        case RakNet::HandshakeState::CONNECTED:
+            LOGI("RakNet handshake completed! Server GUID: %llu, MTU: %d",
+                 (unsigned long long)m_raknetHandshake->GetServerGUID().g,
+                 m_raknetHandshake->GetMTU());
+            SetState(ServerConnectionState::WAIT_MOD_NAME, "RakNet connected");
+            break;
+
+        case RakNet::HandshakeState::FAILED:
+            LOGE("RakNet handshake failed: %s", m_raknetHandshake->GetError().c_str());
+            SetState(ServerConnectionState::ERROR_STATE, "RakNet handshake failed: " + m_raknetHandshake->GetError());
+            if (m_callbacks.onError)
+            {
+                m_callbacks.onError("RakNet handshake failed: " + m_raknetHandshake->GetError());
+            }
+            break;
+
+        default:
+            // Still in progress - state machine handles retries internally
+            break;
+    }
+}
+
+void CServerConnection::SendConnectionRequest()
+{
+    // Send a simple connection request packet
+    // This triggers the test server to respond with MOD_NAME
+    // In real MTA, this would be RakNet's OPEN_CONNECTION_REQUEST_1
+
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(m_serverInfo.port);
+    inet_pton(AF_INET, m_resolvedIP.c_str(), &serverAddr.sin_addr);
+
+    // Simple MTA-style connection request
+    // Format: "MTA" + protocol version + client type
+    uint8_t packet[16];
+    packet[0] = 'M';
+    packet[1] = 'T';
+    packet[2] = 'A';
+    packet[3] = 'C';  // Client
+    packet[4] = (MTA_DM_VERSION >> 8) & 0xFF;
+    packet[5] = MTA_DM_VERSION & 0xFF;
+    packet[6] = (MTA_DM_BITSTREAM_VERSION >> 8) & 0xFF;
+    packet[7] = MTA_DM_BITSTREAM_VERSION & 0xFF;
+
+    ssize_t sent = sendto(m_socket, packet, 8, 0,
+                          reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+
+    if (sent > 0)
+    {
+        LOGI("Sent connection request (%zd bytes) to %s:%d",
+             sent, m_resolvedIP.c_str(), m_serverInfo.port);
+    }
+    else
+    {
+        LOGE("Failed to send connection request: %s", strerror(errno));
+    }
 }
 
 void CServerConnection::ProcessWaitModName()
 {
+    // Resend connection request every 2 seconds if no response
+    static uint64_t lastRequestTime = 0;
+    uint64_t now = GetCurrentTimeMs();
+    if (now - lastRequestTime > 2000)
+    {
+        LOGI("Resending connection request...");
+        SendConnectionRequest();
+        lastRequestTime = now;
+    }
+
     // Poll for incoming data
     struct pollfd pfd;
     pfd.fd = m_socket;
@@ -548,7 +649,7 @@ void CServerConnection::ProcessWaitModName()
 
         if (received > 0)
         {
-            LOGI("Received %zd bytes from server", received);
+            LOGI("Received %zd bytes from server (packet ID: 0x%02X)", received, buffer[0]);
             m_lastPacketTime = GetCurrentTimeMs();
 
             // Check for MOD_NAME packet
@@ -556,6 +657,11 @@ void CServerConnection::ProcessWaitModName()
             {
                 NetBitStream bitStream(buffer + 1, received - 1);
                 HandleModNamePacket(bitStream);
+            }
+            else
+            {
+                LOGD("Unexpected packet ID: 0x%02X (expected MOD_NAME 0x%02X)",
+                     buffer[0], PACKET_ID_MOD_NAME);
             }
         }
     }

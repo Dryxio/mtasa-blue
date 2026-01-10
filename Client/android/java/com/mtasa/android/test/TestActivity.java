@@ -347,9 +347,9 @@ public class TestActivity extends Activity {
     }
 
     private void runServerConnectionTest() {
-        // Test server: VPS with MTA server
-        final String serverHost = "37.59.101.35";
-        final int serverPort = 22004;
+        // MTA server with net_android.so module
+        final String serverHost = "37.59.101.35";  // VPS MTA server
+        final int serverPort = 22004;  // MTA server port (net_android.so integrated)
 
         setRunning(true);
         statusText.setText("Testing server connection...");
@@ -405,10 +405,10 @@ public class TestActivity extends Activity {
                         int state = MTANative.getServerConnectionState();
                         results.append("   State: ").append(getStateName(state)).append("\n");
 
-                        if (state == 7) { // CONNECTED
+                        if (state == 8) { // CONNECTED
                             results.append("   ✓ Successfully connected to server!\n");
                             break;
-                        } else if (state == 9) { // ERROR_STATE
+                        } else if (state == 10) { // ERROR_STATE
                             results.append("   ✗ Connection error\n");
                             break;
                         }
@@ -454,13 +454,14 @@ public class TestActivity extends Activity {
             case 0: return "DISCONNECTED";
             case 1: return "RESOLVING_DNS";
             case 2: return "CONNECTING";
-            case 3: return "WAIT_MOD_NAME";
-            case 4: return "SENDING_JOIN";
-            case 5: return "WAIT_JOIN_COMPLETE";
-            case 6: return "WAIT_JOINED_GAME";
-            case 7: return "CONNECTED";
-            case 8: return "DISCONNECTING";
-            case 9: return "ERROR_STATE";
+            case 3: return "RAKNET_HANDSHAKE";
+            case 4: return "WAIT_MOD_NAME";
+            case 5: return "SENDING_JOIN";
+            case 6: return "WAIT_JOIN_COMPLETE";
+            case 7: return "WAIT_JOINED_GAME";
+            case 8: return "CONNECTED";
+            case 9: return "DISCONNECTING";
+            case 10: return "ERROR_STATE";
             default: return "UNKNOWN(" + state + ")";
         }
     }
