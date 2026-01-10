@@ -8,11 +8,11 @@ Native client port of Multi Theft Auto: San Andreas for Android.
 
 ```
 Build Status:    ✅ APK builds successfully
-Test Results:    40 total, 38 passed, 0 failed, 2 skipped (122.7ms)
+Test Results:    44 total, 42 passed, 0 failed, 2 skipped
 APK Injection:   ✅ GTA:SA v2.10 APK modified with MTA library
 Game Launch:     ✅ Game runs with MTA loaded (Toast: "MTA:SA Android Loaded!")
-Network Module:  ✅ CNetAndroid, CPacketHandler, SyncStructures - ALL TESTS PASS
-Current Work:    Server connection & player synchronization
+Network Module:  ✅ CNetAndroid, CPacketHandler, SyncStructures, CServerConnection
+Current Work:    Server connection testing & player synchronization
 ```
 
 | Subsystem | Status | Notes |
@@ -26,7 +26,8 @@ Current Work:    Server connection & player synchronization
 | Profiler | ✅ Working | Scoped timing |
 | Memory | ✅ Working | Allocation, alignment |
 | FileSystem | ⏭ Skipped | Needs full JNI asset manager setup |
-| **Network** | ✅ Working | CNetAndroid, PacketHandler, SyncStructures (10 tests pass) |
+| **Network** | ✅ Working | CNetAndroid, PacketHandler, SyncStructures (10 tests) |
+| **ServerConnection** | ✅ Working | DNS, MD5, connection state machine (4 tests) |
 
 ## Quick Start
 
@@ -140,13 +141,14 @@ Client/android/
 │
 ├── test/                    # Native test harness
 │   ├── TestHarness.h        # Test framework
-│   ├── SubsystemTests.cpp   # 30 tests
+│   ├── SubsystemTests.cpp   # 44 tests
 │   └── TestNative.cpp       # JNI test interface
 │
 ├── network/                 # Multiplayer network (Phase 7)
 │   ├── CNetAndroid.h/cpp    # Network manager
 │   ├── CPacketHandler.h/cpp # Packet handling
-│   └── SyncStructures.h     # Sync data structures
+│   ├── SyncStructures.h     # Sync data structures
+│   └── CServerConnection.h/cpp # Server connection & testing
 │
 ├── res/values/              # Android resources
 │   ├── strings.xml
@@ -267,7 +269,11 @@ Network protocol foundation implemented:
 - [x] SyncStructures - Player/vehicle sync data structures
 - [x] 100+ packet types defined (from MTA protocol)
 - [x] 50+ RPC functions defined
-- [ ] Server connection integration test
+- [x] CServerConnection - Server connection state machine
+- [x] MD5 hashing for password authentication
+- [x] DNS resolution & connectivity testing
+- [x] JNI interface for connection testing (7 methods)
+- [ ] Server connection integration test (in progress)
 - [ ] Player synchronization (next)
 - [ ] Vehicle synchronization
 - [ ] Server browser UI
@@ -279,7 +285,8 @@ Network protocol foundation implemented:
 network/
 ├── CNetAndroid.h/cpp       # Core network manager (UDP sockets)
 ├── CPacketHandler.h/cpp    # Packet dispatch & handling
-└── SyncStructures.h        # Sync data structures
+├── SyncStructures.h        # Sync data structures
+└── CServerConnection.h/cpp # Server connection & testing
 ```
 
 ## Architecture

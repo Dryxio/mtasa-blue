@@ -19,12 +19,12 @@ This document summarizes the progress on porting MTA:SA (Multi Theft Auto: San A
 
 ```
 Build Status:    ✅ APK builds successfully
-Test Results:    40 total, 38 passed, 0 failed, 2 skipped (122.7ms)
+Test Results:    44 total, 42 passed, 0 failed, 2 skipped
 APK Injection:   ✅ GTA:SA v2.10 APK modified with MTA library (63MB output)
 Game Launch:     ✅ Game runs with MTA loaded
 Visual Proof:    ✅ Toast notification "MTA:SA Android Loaded!" displayed
-Network Tests:   ✅ 10 network protocol tests passing
-Current Phase:   Phase 7 - Multiplayer Logic (in progress)
+Network Tests:   ✅ 14 network/connection tests passing
+Current Phase:   Phase 7 - Multiplayer Logic (server connection testing)
 ```
 
 ---
@@ -61,6 +61,7 @@ Validated on Genymotion emulator (ARM64):
 | **NetBitStream** | 5 | ✅ Pass | BasicTypes, Bits, Compressed, Vectors, String |
 | **SyncStructures** | 3 | ✅ Pass | Position, Health, PlayerFlags |
 | **CNetAndroid** | 2 | ✅ Pass | Initialize, BitStreamAlloc |
+| **ServerConnection** | 4 | ✅ Pass | Initialize, DNS, MD5, StateTransitions |
 
 ---
 
@@ -113,7 +114,8 @@ Client/android/
 ├── network/                 # Network protocol (Phase 7)
 │   ├── CNetAndroid.h/cpp    # UDP networking, NetBitStream
 │   ├── CPacketHandler.h/cpp # 100+ packet types, 50+ RPCs
-│   └── SyncStructures.h     # Player/vehicle sync data
+│   ├── SyncStructures.h     # Player/vehicle sync data
+│   └── CServerConnection.h/cpp # Server connection state machine
 │
 ├── signatures/              # Address mapping
 │   ├── ARMAddressMap.h      # 200+ ARM addresses
@@ -121,7 +123,7 @@ Client/android/
 │
 └── test/                    # Native test harness
     ├── TestHarness.h
-    └── SubsystemTests.cpp   # 40 tests (including 10 network)
+    └── SubsystemTests.cpp   # 44 tests (including 14 network)
 ```
 
 ---
@@ -252,7 +254,8 @@ adb logcat -s MTA-Test
 signatures/ARMAddressMap.h       # ARM32/ARM64 function offsets (200+)
 multiplayer/CMultiplayerSA_ARM.h # Hook handlers
 hooks/ARMHookInstaller.h         # Hook installation API
-test/SubsystemTests.cpp          # 30 validation tests
+network/CServerConnection.h/cpp  # Server connection state machine
+test/SubsystemTests.cpp          # 44 validation tests
 ```
 
 ---
@@ -307,7 +310,13 @@ test/SubsystemTests.cpp          # 30 validation tests
 | 2026-01-10 | 7 | CMakeLists.txt updated with network module |
 | 2026-01-10 | 7 | **Phase 7 foundation complete** - Network protocol ready |
 | 2026-01-10 | 7 | Added 10 network unit tests to SubsystemTests.cpp |
-| 2026-01-10 | 7 | **All network tests PASS** - 40 total, 38 pass, 2 skip |
+| 2026-01-10 | 7 | All network tests PASS - 40 total, 38 pass, 2 skip |
+| 2026-01-10 | 7 | CServerConnection.h/cpp - Server connection state machine |
+| 2026-01-10 | 7 | MD5 password hashing implementation |
+| 2026-01-10 | 7 | DNS resolution & connectivity testing |
+| 2026-01-10 | 7 | JNI interface for connection testing (7 methods) |
+| 2026-01-10 | 7 | Added 4 ServerConnection tests to SubsystemTests.cpp |
+| 2026-01-10 | 7 | **All tests PASS** - 44 total, 42 pass, 2 skip |
 
 ---
 
@@ -321,14 +330,16 @@ test/SubsystemTests.cpp          # 30 validation tests
 | Bitstream | `network/CNetAndroid.h` | ✅ 5 tests pass |
 | Packet Handler | `network/CPacketHandler.h/cpp` | ✅ Tested |
 | Sync Structures | `network/SyncStructures.h` | ✅ 3 tests pass |
+| Server Connection | `network/CServerConnection.h/cpp` | ✅ 4 tests pass |
 
-**Test Results:** 10 network-specific tests passing (NetBitStream: 5, SyncStructures: 3, CNetAndroid: 2)
+**Test Results:** 14 network-specific tests passing (NetBitStream: 5, SyncStructures: 3, CNetAndroid: 2, ServerConnection: 4)
 
 ### Network Features
 - **CNetAndroid**: UDP socket management, connection state, packet queuing
 - **NetBitStream**: Bit-level read/write, compressed types, vectors, quaternions
 - **CPacketHandler**: 100+ packet types, 50+ RPC functions, event callbacks
 - **SyncStructures**: Player puresync, vehicle puresync, keysync, health/armor
+- **CServerConnection**: Connection state machine, MD5 password hashing, DNS resolution, connection testing
 
 ### Packet Types Implemented
 - Connection: JOIN, JOINDATA, QUIT, TIMEOUT
@@ -366,9 +377,13 @@ test/SubsystemTests.cpp          # 30 validation tests
    - ~~CNetAndroid - UDP networking~~
    - ~~CPacketHandler - Protocol dispatcher~~
    - ~~SyncStructures - Sync data types~~
-4. **Phase 7 Integration**: Connect to real MTA server
-   - Test connection handshake
-   - Verify packet exchange
+4. **Phase 7 Integration**: Connect to real MTA server *(In Progress)*
+   - ✅ CServerConnection state machine implemented
+   - ✅ MTA protocol handshake (MOD_NAME → JOINDATA → JOIN_COMPLETE → JOINED_GAME)
+   - ✅ MD5 password hashing
+   - ✅ DNS resolution & connectivity testing
+   - ✅ JNI interface for connection testing (7 methods)
+   - ⏳ Integration test with real MTA server (needs network access)
    - Debug any protocol issues
 5. **Phase 7 Sync**: Implement synchronization
    - Player position sync
@@ -383,4 +398,4 @@ test/SubsystemTests.cpp          # 30 validation tests
 
 *Document prepared from codebase analysis and development progress.*
 *Phases 1-6 complete and VERIFIED. Phase 7 network foundation complete.*
-*Next: Integration testing with real MTA server.*
+*Server connection infrastructure implemented. Next: Integration testing with real MTA server.*
