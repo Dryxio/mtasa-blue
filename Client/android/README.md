@@ -22,8 +22,10 @@ Disconnect:      ✅ Server handles client disconnect/timeout without crash
 Position Sync:   ✅ CPlayerSync infrastructure ready
 Game Bypass:     ✅ CGameBypass auto-spawn working (no crash!)
 Auto-Spawn:      ✅ Triggers at game state 8, player spawns at Grove Street
+ARM64 Offsets:   ✅ Found via nm -D: FindPlayerPed, CPed::Teleport, SetMatrix
+Teleport:        ✅ WORKING! Direct matrix write teleports player successfully
 Server Issue:    ⚠️ net_android.so segfaults on VPS (needs debugging)
-Current Phase:   Phase 7d - Auto-spawn infra done, need actual bypass patches
+Current Phase:   Phase 7d - Teleport working, ready for position sync
 ```
 
 | Subsystem | Status | Notes |
@@ -355,8 +357,12 @@ Network protocol foundation implemented and **verified working on Android device
 
 **Priority tasks:**
 - [ ] **Fix net_android.so crash** - Server segfaults on VPS (blocking)
-- [ ] **Research CPed/CPlayerPed offsets for ARM64** - Need to read/write player position
-- [ ] **Spawn player in multiplayer** - Teleport to spawn point when connected
+- [x] **Research CPed/CPlayerPed offsets for ARM64** - Found via `nm -D libGTASA.so`:
+  - `0x4EFAE0` - FindPlayerPed(int)
+  - `0x59DD90` - CPed::Teleport(CVector, bool)
+  - `0x4EBF5C` - CPlaceable::SetMatrix(CMatrix&)
+- [x] **Spawn player in multiplayer** - Implemented in CGameBypass using CPed::Teleport
+- [x] **Test teleport on device** - ✅ VERIFIED WORKING! Player teleports to Grove Street
 - [ ] **Position sync with server** - Send local position, receive other players
 - [ ] **Render other players** - Show synced players in game world
 
@@ -367,6 +373,109 @@ Network protocol foundation implemented and **verified working on Android device
 - [ ] Server browser UI
 - [ ] Resource/Lua system
 - [ ] Multiplayer GUI/HUD
+
+---
+
+## Reverse Engineering ARM64 Addresses
+
+**For future Claude Code agents:** Here's how to find new ARM64 function addresses in libGTASA.so.
+
+### Method 1: Symbol Export (Fastest - Use This First!)
+
+GTA:SA Android's `libGTASA.so` has **exported symbols**, making reverse engineering much easier than expected:
+
+```bash
+# Extract the library from APK
+unzip -j gtasa.apk lib/arm64-v8a/libGTASA.so -d /tmp/
+
+# List all exported symbols with addresses
+nm -D /tmp/libGTASA.so | grep -i "function_name"
+
+# Examples:
+nm -D /tmp/libGTASA.so | grep -i "FindPlayerPed"
+# Output: 00000000004efae0 T _Z13FindPlayerPedi
+
+nm -D /tmp/libGTASA.so | grep -i "Teleport"
+# Output: 000000000059dd90 T _ZN4CPed8TeleportE7CVectorh
+
+nm -D /tmp/libGTASA.so | grep -i "SetMatrix"
+# Output: 00000000004ebf5c T _ZN10CPlaceable9SetMatrixER7CMatrix
+```
+
+**Symbol name decoding (C++ mangling):**
+- `_Z13FindPlayerPedi` → `FindPlayerPed(int)`
+- `_ZN4CPed8TeleportE7CVectorh` → `CPed::Teleport(CVector, unsigned char)`
+- `_ZN10CPlaceable9SetMatrixER7CMatrix` → `CPlaceable::SetMatrix(CMatrix&)`
+
+### Method 2: Ghidra (For Non-Exported Symbols)
+
+If a function isn't exported, use Ghidra:
+
+```bash
+# 1. Copy libGTASA.so to the Ghidra host (e.g., VPS with X11)
+scp /tmp/libGTASA.so user@vps:/tmp/
+
+# 2. Run Ghidra with the library
+ghidraRun  # Open GUI, import libGTASA.so as AARCH64
+
+# 3. Let auto-analysis complete (takes ~30 min for 47MB library)
+
+# 4. Search for strings or function patterns
+# Search → For Strings → "CPlayerPed"
+# Then find XREFs to locate functions
+```
+
+### Method 3: Cross-Reference from SA-MP/MTA PC
+
+Many addresses can be found by pattern matching with PC versions:
+1. Find the function in MTA/SA-MP PC source code
+2. Identify unique byte patterns or string references
+3. Search for similar patterns in ARM64 binary
+
+### Key Findings for ARM64 (GTA:SA v2.10)
+
+| Function | Address | Signature | Notes |
+|----------|---------|-----------|-------|
+| `FindPlayerPed` | `0x4EFAE0` | `void* FindPlayerPed(int)` | Returns player ped pointer |
+| `CPed::Teleport` | `0x59DD90` | `void Teleport(CVector, bool)` | Teleports ped to position |
+| `CPlaceable::SetMatrix` | `0x4EBF5C` | `void SetMatrix(CMatrix&)` | Sets entity transform |
+| `FindPlayerInfo` | `0x4EFA34` | `CPlayerInfo* FindPlayerInfo(int)` | Returns player info struct |
+| `FindPlayerCoors` | `0x4F00D4` | `void FindPlayerCoors(CVector&, int)` | Gets player position |
+
+### Ped Matrix Structure (for Direct Memory Access)
+
+When function calls don't work, write directly to memory:
+
+```cpp
+// Get ped pointer
+void* pPed = FindPlayerPed(0);
+uintptr_t pedAddr = (uintptr_t)pPed;
+
+// Matrix pointer is at offset 0x18 from ped base
+uintptr_t* pMatrixPtr = (uintptr_t*)(pedAddr + 0x18);
+uintptr_t matrixAddr = *pMatrixPtr;
+
+// Position is in the 4th column of the matrix
+float* posX = (float*)(matrixAddr + 0x30);
+float* posY = (float*)(matrixAddr + 0x34);
+float* posZ = (float*)(matrixAddr + 0x38);
+
+// Write new position
+*posX = 2488.56f;  // Grove Street X
+*posY = -1666.86f; // Grove Street Y
+*posZ = 12.88f;    // Grove Street Z
+```
+
+### Tips for Future Research
+
+1. **Always try `nm -D` first** - Most GTA:SA functions are exported
+2. **Use demangler** for C++ symbols: `c++filt _ZN4CPed8TeleportE7CVectorh`
+3. **ARM64 struct passing**: Small structs (≤16 bytes) are passed in registers, not pointers
+4. **Add delays**: Game functions may not work during loading/cutscenes
+5. **Matrix offset 0x18**: CPlaceable::m_pCoords pointer on ARM64
+6. **Position offsets 0x30/0x34/0x38**: X/Y/Z in CMatrix on ARM64
+
+---
 
 **Phase 7b Approach Results:**
 | Option | Description | Effort | Status |

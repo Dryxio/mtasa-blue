@@ -436,6 +436,19 @@ namespace MTA::Android::ARM
         constexpr uint32_t CPed_UseFreeAimMagnetize           = 0x59F3E4;
         constexpr uint32_t CPed_FlagToDestroyWhenNextProcessed = 0x59E484;
         constexpr uint32_t CPed_ReplaceWeaponForScriptedCutscene = 0x59BC6C;
+        constexpr uint32_t CPed_Teleport                      = 0x59DD90;  // CPed::Teleport(CVector, bool) - from nm -D
+
+        //---------------------------------------------------------------------
+        // CPlaceable / CEntity
+        //---------------------------------------------------------------------
+        constexpr uint32_t CPlaceable_SetMatrix               = 0x4EBF5C;  // CPlaceable::SetMatrix(CMatrix&) - from nm -D
+
+        //---------------------------------------------------------------------
+        // Global Functions
+        //---------------------------------------------------------------------
+        constexpr uint32_t FindPlayerPed                      = 0x4EFAE0;  // FindPlayerPed(int) - from nm -D
+        constexpr uint32_t FindPlayerInfo                     = 0x4EFA34;  // FindPlayerInfo(int) - from nm -D
+        constexpr uint32_t FindPlayerCoors                    = 0x4F00D4;  // FindPlayerCoors(CVector&, int) - from nm -D
 
         //---------------------------------------------------------------------
         // CVehicle

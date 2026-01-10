@@ -200,13 +200,36 @@ void CGameBypass::Process()
     if (!m_initialized)
         return;
 
-    // Auto-spawn when game is ready
+    // Auto-spawn when game is ready (with delay to let cutscenes/loading finish)
     if (m_waitingForSpawn && !m_playerSpawned)
     {
         if (IsGameReadyForSpawn())
         {
-            LOGI("Game ready for spawn - triggering auto-spawn");
-            SpawnLocalPlayerDefault();
+            // Wait for 300 frames (~5 seconds at 60fps) before spawning
+            // This gives time for cutscenes and loading to complete
+            m_spawnDelayFrames++;
+
+            if (m_spawnDelayFrames == 1)
+            {
+                LOGI("Game ready - waiting 5 seconds before spawn...");
+            }
+
+            if (m_spawnDelayFrames >= 300)
+            {
+                LOGI("Delay complete - triggering spawn (frame %d)", m_spawnDelayFrames);
+                SpawnLocalPlayerDefault();
+            }
+        }
+    }
+
+    // Retry teleport a few times after initial spawn (in case first one was too early)
+    if (m_playerSpawned && m_teleportRetryCount < 5)
+    {
+        m_teleportRetryCount++;
+        if (m_teleportRetryCount % 60 == 0)  // Every ~1 second
+        {
+            LOGI("Retry teleport attempt %d", m_teleportRetryCount / 60);
+            RestartPlayerAt(DEFAULT_SPAWN_X, DEFAULT_SPAWN_Y, DEFAULT_SPAWN_Z, DEFAULT_SPAWN_ROT);
         }
     }
 }
@@ -314,13 +337,24 @@ void* CGameBypass::GetLocalPlayerPed() const
     if (!m_initialized)
         return nullptr;
 
-    // For now, just return a non-null value to indicate game is ready
-    // The actual player ped lookup needs proper offset research
-    // This allows the spawn flow to complete without crashing
+#if defined(__aarch64__)
+    // Call FindPlayerPed(0) to get local player ped pointer
+    typedef void* (*FindPlayerPed_t)(int);
+    auto FindPlayerPed = reinterpret_cast<FindPlayerPed_t>(m_libBase + ARM64::FindPlayerPed);
 
-    // Return a dummy non-null pointer to indicate "ready"
-    // We won't actually access this memory in the simplified spawn
-    return reinterpret_cast<void*>(1);
+    void* pPed = FindPlayerPed(0);
+
+    if (pPed)
+    {
+        LOGI("FindPlayerPed(0) returned: 0x%lx", (unsigned long)pPed);
+    }
+
+    return pPed;
+#else
+    // ARM32: Not yet implemented
+    LOGW("GetLocalPlayerPed: ARM32 not implemented");
+    return nullptr;
+#endif
 }
 
 void CGameBypass::RestartPlayerAt(float x, float y, float z, float rotation)
@@ -328,18 +362,71 @@ void CGameBypass::RestartPlayerAt(float x, float y, float z, float rotation)
     if (!m_initialized)
         return;
 
-    // For now, just log the spawn position
-    // Full implementation requires proper player ped offsets for ARM64
-    // which need to be researched from the actual libGTASA.so binary
+    LOGI("RestartPlayerAt: Teleporting to (%.2f, %.2f, %.2f) rot=%.2f", x, y, z, rotation);
 
-    LOGI("RestartPlayerAt called: (%.2f, %.2f, %.2f) rot=%.2f", x, y, z, rotation);
-    LOGI("NOTE: Position setting is a stub - proper offsets needed");
+#if defined(__aarch64__)
+    // Get the local player ped
+    void* pPed = GetLocalPlayerPed();
+    if (!pPed)
+    {
+        LOGE("RestartPlayerAt: Cannot get local player ped");
+        return;
+    }
 
-    // TODO: Research actual CPlayerPed offsets for ARM64:
-    // - Find CWorld::Players array address
-    // - Find CPlayerInfo structure layout
-    // - Find CPed/CEntity matrix offset
-    // - Call game's native teleport/spawn function instead of direct memory write
+    // ARM64 ABI: CVector (12 bytes = 3 floats) is passed by value in registers
+    // The function signature is: void CPed::Teleport(CVector pos, bool resetRotation)
+    // On ARM64: this=x0, pos.x=s0, pos.y=s1, pos.z=s2, resetRotation=w1
+    // But since CVector is a struct, it might be passed differently...
+
+    // Try method 1: Pass floats directly (ARM64 passes small structs in registers)
+    typedef void (*CPed_Teleport_ByValue_t)(void* pPed, float x, float y, float z, uint8_t resetRotation);
+    auto TeleportByValue = reinterpret_cast<CPed_Teleport_ByValue_t>(m_libBase + ARM64::CPed_Teleport);
+
+    LOGI("Calling CPed::Teleport (by value) at 0x%lx with ped 0x%lx",
+         (unsigned long)(m_libBase + ARM64::CPed_Teleport),
+         (unsigned long)pPed);
+
+    TeleportByValue(pPed, x, y, z, 0);
+
+    LOGI("Teleport call completed");
+
+    // Also try directly setting the position matrix as a fallback
+    // CPed inherits from CPlaceable which has a matrix at offset 0x14 (ARM64)
+    // The matrix position is at offset 0x30-0x3C within the matrix (last column)
+
+    // Try to write position directly to ped matrix
+    // CPlaceable::m_matrix is at offset 0x14 from ped base
+    // CMatrix position is at offsets 0x30 (x), 0x34 (y), 0x38 (z)
+    uintptr_t pedAddr = reinterpret_cast<uintptr_t>(pPed);
+
+    // Read matrix pointer (CPlaceable::m_pCoords at offset 0x18 on ARM64)
+    uintptr_t* pMatrixPtr = reinterpret_cast<uintptr_t*>(pedAddr + 0x18);
+    uintptr_t matrixAddr = *pMatrixPtr;
+
+    if (matrixAddr != 0)
+    {
+        LOGI("Matrix at 0x%lx, writing position directly", (unsigned long)matrixAddr);
+
+        // Position is in the 4th column of the matrix (offsets 0x30, 0x34, 0x38)
+        float* posX = reinterpret_cast<float*>(matrixAddr + 0x30);
+        float* posY = reinterpret_cast<float*>(matrixAddr + 0x34);
+        float* posZ = reinterpret_cast<float*>(matrixAddr + 0x38);
+
+        *posX = x;
+        *posY = y;
+        *posZ = z;
+
+        LOGI("Direct matrix write: (%.2f, %.2f, %.2f)", *posX, *posY, *posZ);
+    }
+    else
+    {
+        LOGW("Matrix pointer is null, cannot write position directly");
+    }
+
+#else
+    // ARM32: Not yet implemented
+    LOGW("RestartPlayerAt: ARM32 not implemented");
+#endif
 }
 
 void CGameBypass::SetPlayerModel(int modelId)

@@ -200,6 +200,8 @@ private:
     bool m_playerSpawned = false;
     bool m_patchesApplied = false;
     bool m_waitingForSpawn = false;
+    int m_spawnDelayFrames = 0;       // Delay before spawning (wait for game to fully load)
+    int m_teleportRetryCount = 0;     // Retry teleport multiple times
 
     std::function<void()> m_onSpawnCallback;
 
