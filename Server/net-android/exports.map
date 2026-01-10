@@ -1,0 +1,13 @@
+# Symbol export map for net_android.so
+# Only export the required interface functions
+
+{
+    global:
+        InitNetServerInterface;
+        ReleaseNetServerInterface;
+        CheckCompatibility;
+        GetLibMtaVersion;
+
+    local:
+        *;
+};
