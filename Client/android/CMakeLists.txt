@@ -91,6 +91,7 @@ include_directories(
     ${ANDROID_JNI_DIR}
     ${ANDROID_TEST_DIR}
     ${ANDROID_NETWORK_DIR}
+    ${ANDROID_NETWORK_DIR}/raknet
     ${CMAKE_CURRENT_SOURCE_DIR}/multiplayer
     ${CMAKE_CURRENT_SOURCE_DIR}/game_sa
 
@@ -160,6 +161,10 @@ set(GAMESA_SOURCES
     ${ANDROID_GAMESA_DIR}/CPedSA_ARM.h
     ${ANDROID_GAMESA_DIR}/CVehicleSA_ARM.h
     ${ANDROID_GAMESA_DIR}/CWorldSA_ARM.h
+    ${ANDROID_GAMESA_DIR}/GTASAIntegration.h
+    ${ANDROID_GAMESA_DIR}/CPlayerSync.h
+    ${ANDROID_GAMESA_DIR}/CGameBypass.h
+    ${ANDROID_GAMESA_DIR}/CGameBypass.cpp
 )
 
 # Core Module (Phase 5)
@@ -193,6 +198,13 @@ set(NETWORK_SOURCES
     ${ANDROID_NETWORK_DIR}/CServerConnection.cpp
 )
 
+# RakNet Minimal Handshake (custom implementation for MTA)
+set(RAKNET_DIR "${ANDROID_NETWORK_DIR}/raknet")
+set(RAKNET_SOURCES
+    ${RAKNET_DIR}/RakNetHandshake.h
+    ${RAKNET_DIR}/RakNetHandshake.cpp
+)
+
 # =============================================================================
 # Libraries
 # =============================================================================
@@ -208,6 +220,7 @@ add_library(mta_android SHARED
     ${CORE_SOURCES}
     ${TEST_SOURCES}
     ${NETWORK_SOURCES}
+    ${RAKNET_SOURCES}
 )
 
 target_compile_definitions(mta_android PRIVATE
