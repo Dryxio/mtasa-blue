@@ -384,6 +384,15 @@ namespace MTA::Android::ARM
         constexpr uint32_t g_PlayerInFocus                    = 0x679B5C;
 
         //---------------------------------------------------------------------
+        // Game State Addresses (from SA-MP 2.10 dumps)
+        //---------------------------------------------------------------------
+        constexpr uint32_t gGameState                         = 0xA987C8;  // Current game state (SystemState enum)
+        constexpr uint32_t DoGameState                        = 0x5E4765;  // DoGameState() function
+        constexpr uint32_t MainMenuScreen_OnStartGame         = 0x29DB85;  // MainMenuScreen::OnStartGame()
+        constexpr uint32_t StartGameScreen_OnNewGameCheck     = 0x2A7271;  // StartGameScreen::OnNewGameCheck()
+        constexpr uint32_t CLoadingScreen_DisplayPCScreen     = 0x2A7BB1;  // CLoadingScreen::DisplayPCScreen()
+
+        //---------------------------------------------------------------------
         // PLT Hook Addresses (from SAMP_ANDROID_REFERENCE.md)
         //---------------------------------------------------------------------
         constexpr uint32_t PLT_CCamera_Process                = 0x6717BC;
@@ -447,6 +456,14 @@ namespace MTA::Android::ARM
         //---------------------------------------------------------------------
         constexpr uint32_t CWorld_ProcessLineOfSight_Caller   = 0x70253C;  // From SAMP_ANDROID_REFERENCE.md
         constexpr uint32_t CWorld_FindRoofZFor3DCoord         = 0x50F4A4;
+
+        //---------------------------------------------------------------------
+        // Game State Addresses (from SA-MP 2.10 64-bit dumps)
+        //---------------------------------------------------------------------
+        constexpr uint32_t gGameState                         = 0xD3D640;  // Current game state (SystemState enum)
+        constexpr uint32_t DoGameState                        = 0x70A208;  // DoGameState() function
+        constexpr uint32_t MainMenuScreen_OnStartGame         = 0x35A31C;  // MainMenuScreen::OnStartGame()
+        constexpr uint32_t StartGameScreen_OnNewGameCheck     = 0x365EA0;  // StartGameScreen::OnNewGameCheck()
 
         //---------------------------------------------------------------------
         // CWeapon
