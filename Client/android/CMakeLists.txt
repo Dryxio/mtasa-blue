@@ -75,6 +75,7 @@ set(ANDROID_PLATFORM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/platform")
 set(ANDROID_SIGNATURES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/signatures")
 set(ANDROID_JNI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/jni")
 set(ANDROID_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
+set(ANDROID_NETWORK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/network")
 
 # =============================================================================
 # Include Directories
@@ -89,6 +90,7 @@ include_directories(
     ${ANDROID_SIGNATURES_DIR}
     ${ANDROID_JNI_DIR}
     ${ANDROID_TEST_DIR}
+    ${ANDROID_NETWORK_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/multiplayer
     ${CMAKE_CURRENT_SOURCE_DIR}/game_sa
 
@@ -180,6 +182,15 @@ set(TEST_SOURCES
     ${ANDROID_TEST_DIR}/TestNative.cpp
 )
 
+# Network Module (Phase 7)
+set(NETWORK_SOURCES
+    ${ANDROID_NETWORK_DIR}/CNetAndroid.h
+    ${ANDROID_NETWORK_DIR}/CNetAndroid.cpp
+    ${ANDROID_NETWORK_DIR}/CPacketHandler.h
+    ${ANDROID_NETWORK_DIR}/CPacketHandler.cpp
+    ${ANDROID_NETWORK_DIR}/SyncStructures.h
+)
+
 # =============================================================================
 # Libraries
 # =============================================================================
@@ -194,6 +205,7 @@ add_library(mta_android SHARED
     ${JNI_SOURCES}
     ${CORE_SOURCES}
     ${TEST_SOURCES}
+    ${NETWORK_SOURCES}
 )
 
 target_compile_definitions(mta_android PRIVATE

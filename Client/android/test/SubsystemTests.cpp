@@ -11,6 +11,8 @@
 #include "../core/CProfiler.h"
 #include "../hooks/ARMHookSystem.h"
 #include "../signatures/SignatureScanner.h"
+#include "../network/CNetAndroid.h"
+#include "../network/SyncStructures.h"
 
 #include <cstring>
 #include <thread>
@@ -696,6 +698,256 @@ TestResult Test_Memory_Alignment()
 } // anonymous namespace
 
 //=============================================================================
+// Network Protocol Tests (Phase 7)
+//=============================================================================
+
+namespace
+{
+
+using namespace MTA::Android::Network;
+
+TestResult Test_NetBitStream_BasicTypes()
+{
+    NetBitStream bs;
+
+    // Write various types
+    bs.Write(static_cast<uint8_t>(0xAB));
+    bs.Write(static_cast<int16_t>(-1234));
+    bs.Write(static_cast<uint32_t>(0xDEADBEEF));
+    bs.Write(3.14159f);
+
+    // Reset read pointer
+    bs.ResetReadPointer();
+
+    // Read back and verify
+    uint8_t u8;
+    int16_t i16;
+    uint32_t u32;
+    float f32;
+
+    ASSERT_TRUE(bs.Read(u8), "Failed to read uint8");
+    ASSERT_EQ(u8, 0xAB, "uint8 mismatch");
+
+    ASSERT_TRUE(bs.Read(i16), "Failed to read int16");
+    ASSERT_EQ(i16, -1234, "int16 mismatch");
+
+    ASSERT_TRUE(bs.Read(u32), "Failed to read uint32");
+    ASSERT_EQ(u32, 0xDEADBEEF, "uint32 mismatch");
+
+    ASSERT_TRUE(bs.Read(f32), "Failed to read float");
+    ASSERT_TRUE(std::abs(f32 - 3.14159f) < 0.0001f, "float mismatch");
+
+    TEST_LOG("  Basic types: OK");
+    return TestPass();
+}
+
+TestResult Test_NetBitStream_Bits()
+{
+    NetBitStream bs;
+
+    // Write individual bits
+    bs.WriteBit(true);
+    bs.WriteBit(false);
+    bs.WriteBit(true);
+    bs.WriteBit(true);
+    bs.WriteBit(false);
+
+    // Reset and read
+    bs.ResetReadPointer();
+
+    ASSERT_TRUE(bs.ReadBit() == true, "Bit 0 mismatch");
+    ASSERT_TRUE(bs.ReadBit() == false, "Bit 1 mismatch");
+    ASSERT_TRUE(bs.ReadBit() == true, "Bit 2 mismatch");
+    ASSERT_TRUE(bs.ReadBit() == true, "Bit 3 mismatch");
+    ASSERT_TRUE(bs.ReadBit() == false, "Bit 4 mismatch");
+
+    TEST_LOG("  Bit operations: OK");
+    return TestPass();
+}
+
+TestResult Test_NetBitStream_Compressed()
+{
+    NetBitStream bs;
+
+    // Write compressed values
+    bs.WriteCompressed(static_cast<uint16_t>(0));      // Should be minimal
+    bs.WriteCompressed(static_cast<uint16_t>(100));    // Small value
+    bs.WriteCompressed(static_cast<uint16_t>(50000));  // Large value
+
+    bs.ResetReadPointer();
+
+    uint16_t v1, v2, v3;
+    ASSERT_TRUE(bs.ReadCompressed(v1), "Failed to read compressed 1");
+    ASSERT_EQ(v1, 0, "Compressed value 1 mismatch");
+
+    ASSERT_TRUE(bs.ReadCompressed(v2), "Failed to read compressed 2");
+    ASSERT_EQ(v2, 100, "Compressed value 2 mismatch");
+
+    ASSERT_TRUE(bs.ReadCompressed(v3), "Failed to read compressed 3");
+    ASSERT_EQ(v3, 50000, "Compressed value 3 mismatch");
+
+    TEST_LOG("  Compressed types: OK");
+    return TestPass();
+}
+
+TestResult Test_NetBitStream_Vectors()
+{
+    NetBitStream bs;
+
+    // Write normal vector
+    bs.WriteVector(100.5f, -50.25f, 200.75f);
+
+    // Write normalized vector
+    float len = std::sqrt(0.5f * 0.5f + 0.5f * 0.5f + 0.707f * 0.707f);
+    bs.WriteNormVector(0.5f / len, 0.5f / len, 0.707f / len);
+
+    bs.ResetReadPointer();
+
+    float x, y, z;
+    ASSERT_TRUE(bs.ReadVector(x, y, z), "Failed to read vector");
+    ASSERT_TRUE(std::abs(x - 100.5f) < 0.01f, "Vector X mismatch");
+    ASSERT_TRUE(std::abs(y - (-50.25f)) < 0.01f, "Vector Y mismatch");
+    ASSERT_TRUE(std::abs(z - 200.75f) < 0.01f, "Vector Z mismatch");
+
+    float nx, ny, nz;
+    ASSERT_TRUE(bs.ReadNormVector(nx, ny, nz), "Failed to read norm vector");
+    // Normalized vectors have some precision loss, allow larger tolerance
+    ASSERT_TRUE(std::abs(nx) < 1.1f, "NormVector X out of range");
+    ASSERT_TRUE(std::abs(ny) < 1.1f, "NormVector Y out of range");
+    ASSERT_TRUE(std::abs(nz) < 1.1f, "NormVector Z out of range");
+
+    TEST_LOG("  Vector types: OK");
+    return TestPass();
+}
+
+TestResult Test_NetBitStream_String()
+{
+    NetBitStream bs;
+
+    std::string testStr = "Hello MTA Android!";
+    bs.Write(testStr);
+
+    bs.ResetReadPointer();
+
+    std::string readStr;
+    ASSERT_TRUE(bs.Read(readStr, 256), "Failed to read string");
+    ASSERT_TRUE(readStr == testStr, "String mismatch");
+
+    TEST_LOG("  String: '%s'", readStr.c_str());
+    return TestPass();
+}
+
+TestResult Test_SyncStructures_Position()
+{
+    NetBitStream bs;
+
+    SPositionSync posWrite(1234.5f, -567.8f, 90.0f);
+    posWrite.Write(bs);
+
+    bs.ResetReadPointer();
+
+    SPositionSync posRead;
+    ASSERT_TRUE(posRead.Read(bs), "Failed to read position");
+    ASSERT_TRUE(std::abs(posRead.x - 1234.5f) < 0.1f, "Position X mismatch");
+    ASSERT_TRUE(std::abs(posRead.y - (-567.8f)) < 0.1f, "Position Y mismatch");
+    ASSERT_TRUE(std::abs(posRead.z - 90.0f) < 0.1f, "Position Z mismatch");
+
+    TEST_LOG("  Position sync: OK");
+    return TestPass();
+}
+
+TestResult Test_SyncStructures_Health()
+{
+    NetBitStream bs;
+
+    SHealthSync healthWrite(85.5f);
+    SArmorSync armorWrite(50.0f);
+
+    healthWrite.Write(bs);
+    armorWrite.Write(bs);
+
+    bs.ResetReadPointer();
+
+    SHealthSync healthRead;
+    SArmorSync armorRead;
+
+    ASSERT_TRUE(healthRead.Read(bs), "Failed to read health");
+    ASSERT_TRUE(armorRead.Read(bs), "Failed to read armor");
+
+    // Allow some precision loss due to compression
+    ASSERT_TRUE(std::abs(healthRead.health - 85.5f) < 2.0f, "Health mismatch");
+    ASSERT_TRUE(std::abs(armorRead.armor - 50.0f) < 1.0f, "Armor mismatch");
+
+    TEST_LOG("  Health: %.1f, Armor: %.1f", healthRead.health, armorRead.armor);
+    return TestPass();
+}
+
+TestResult Test_SyncStructures_PlayerFlags()
+{
+    NetBitStream bs;
+
+    SPlayerPuresyncFlags flagsWrite;
+    flagsWrite.isOnGround = true;
+    flagsWrite.isDucked = true;
+    flagsWrite.hasAWeapon = true;
+    flagsWrite.syncingVelocity = true;
+
+    flagsWrite.Write(bs);
+
+    bs.ResetReadPointer();
+
+    SPlayerPuresyncFlags flagsRead;
+    ASSERT_TRUE(flagsRead.Read(bs), "Failed to read flags");
+
+    ASSERT_TRUE(flagsRead.isOnGround == true, "isOnGround mismatch");
+    ASSERT_TRUE(flagsRead.isDucked == true, "isDucked mismatch");
+    ASSERT_TRUE(flagsRead.hasAWeapon == true, "hasAWeapon mismatch");
+    ASSERT_TRUE(flagsRead.syncingVelocity == true, "syncingVelocity mismatch");
+    ASSERT_TRUE(flagsRead.isInWater == false, "isInWater should be false");
+
+    TEST_LOG("  Player flags: OK");
+    return TestPass();
+}
+
+TestResult Test_CNetAndroid_Initialize()
+{
+    auto& net = CNetAndroid::Instance();
+
+    ASSERT_TRUE(net.Initialize(), "Failed to initialize CNetAndroid");
+
+    // Check initial state
+    ASSERT_TRUE(net.GetState() == ConnectionState::Disconnected, "Should start disconnected");
+    ASSERT_FALSE(net.IsConnected(), "Should not be connected");
+
+    // Get local IP (may return 0.0.0.0 but shouldn't crash)
+    std::string localIP = net.GetLocalIP();
+    TEST_LOG("  Local IP: %s", localIP.c_str());
+
+    net.Shutdown();
+    return TestPass();
+}
+
+TestResult Test_CNetAndroid_BitStreamAlloc()
+{
+    auto& net = CNetAndroid::Instance();
+    net.Initialize();
+
+    // Allocate bitstream
+    auto bs = net.AllocateBitStream();
+    ASSERT_TRUE(bs != nullptr, "Failed to allocate bitstream");
+
+    // Write some data
+    bs->Write(static_cast<uint32_t>(0x12345678));
+    ASSERT_EQ(bs->GetBytesUsed(), 4, "BitStream size mismatch");
+
+    net.Shutdown();
+    TEST_LOG("  BitStream allocation: OK");
+    return TestPass();
+}
+
+} // anonymous namespace
+
+//=============================================================================
 // Test Registration
 //=============================================================================
 
@@ -755,6 +1007,20 @@ struct TestRegistration
         // Memory tests
         harness.RegisterTest("Allocation", "Memory", Test_Memory_Allocation);
         harness.RegisterTest("Alignment", "Memory", Test_Memory_Alignment);
+
+        // Network Protocol tests (Phase 7)
+        harness.RegisterTest("BasicTypes", "NetBitStream", Test_NetBitStream_BasicTypes);
+        harness.RegisterTest("Bits", "NetBitStream", Test_NetBitStream_Bits);
+        harness.RegisterTest("Compressed", "NetBitStream", Test_NetBitStream_Compressed);
+        harness.RegisterTest("Vectors", "NetBitStream", Test_NetBitStream_Vectors);
+        harness.RegisterTest("String", "NetBitStream", Test_NetBitStream_String);
+
+        harness.RegisterTest("Position", "SyncStructures", Test_SyncStructures_Position);
+        harness.RegisterTest("Health", "SyncStructures", Test_SyncStructures_Health);
+        harness.RegisterTest("PlayerFlags", "SyncStructures", Test_SyncStructures_PlayerFlags);
+
+        harness.RegisterTest("Initialize", "CNetAndroid", Test_CNetAndroid_Initialize);
+        harness.RegisterTest("BitStreamAlloc", "CNetAndroid", Test_CNetAndroid_BitStreamAlloc);
 
         TEST_LOG("Registered %zu tests", harness.GetTestCount());
     }
