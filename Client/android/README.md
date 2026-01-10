@@ -349,20 +349,19 @@ Network protocol foundation implemented and **verified working on Android device
 **Phase 7d - Gameplay Sync (In Progress):**
 - [x] CPlayerSync infrastructure (reads player position from game memory)
 - [x] Server disconnect/timeout handling (no more crashes)
-- [x] **CGameBypass** - Menu bypass and auto-spawn system
-  - Monitors `gGameState` to detect when game is ready (GS_PLAYING_GAME)
-  - Auto-spawns player at Grove Street (2488.5, -1666.8, 12.9) when game loads
-  - Sets world time (12:00), weather (clear), camera behind player
-  - Based on SA-MP Android approach (bypasses singleplayer flow)
-  - Key addresses: `gGameState`, `g_WorldPlayersPtr`, `g_PlayerInFocus`
-- [x] **Auto-spawn verified on Genymotion (Jan 10, 2026)**
-  - Game state monitoring works (0→8→9 transitions logged)
-  - Auto-spawn triggers at state 8 (GS_INIT_PLAYING_GAME)
-  - Player marked as spawned, position sync thread starts
-  - Crash fixed by making RestartPlayerAt() a stub (proper offsets needed)
-- [ ] Research proper CPed position offsets for ARM64
-- [ ] Actual position setting (currently stub - just logs)
-- [ ] Player synchronization (see other players)
+- [x] CGameBypass - Game state monitoring system
+  - Monitors `gGameState` to detect when game is ready
+  - Triggers spawn callback when game reaches playing state
+
+**Priority tasks:**
+- [ ] **Fix net_android.so crash** - Server segfaults on VPS (blocking)
+- [ ] **Research CPed/CPlayerPed offsets for ARM64** - Need to read/write player position
+- [ ] **Spawn player in multiplayer** - Teleport to spawn point when connected
+- [ ] **Position sync with server** - Send local position, receive other players
+- [ ] **Render other players** - Show synced players in game world
+
+**Later (not urgent):**
+- [ ] Menu bypass (Social Club has Offline button, menus can be passed manually)
 - [ ] Vehicle synchronization
 - [ ] Chat
 - [ ] Server browser UI

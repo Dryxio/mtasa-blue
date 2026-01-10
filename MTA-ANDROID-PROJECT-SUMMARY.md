@@ -32,8 +32,9 @@ Vtable Fix:      ✅ Fixed CNetServer vtable compatibility with deathmatch.so
 Server:          ✅ 37.59.101.35:22004 with net_android.so
 Disconnect:      ✅ Server handles client disconnect/timeout without crash
 Position Sync:   ✅ CPlayerSync infrastructure ready, sync thread starts after spawn
-Auto-Spawn:      ✅ CGameBypass triggers at game state 8, crash fixed!
-Current Phase:   Phase 7d - Auto-spawn verified, need ARM64 CPed offsets
+Game Monitor:    ✅ CGameBypass monitors game state (0→8→9 transitions)
+Server Issue:    ⚠️ net_android.so segfaults on VPS (needs fix)
+Current Phase:   Phase 7d - Need: fix server crash, CPed offsets, player sync
 ```
 
 ---
@@ -880,11 +881,14 @@ Run MTA server accepting both client types:
    - ✅ **MTA server integration COMPLETE** (net_android.so replaces net.so)
    - ✅ Fixed vtable compatibility (CBinaryFileInterface removed, HTTP stub added)
    - ✅ Server running on 37.59.101.35:22004
-6. **Phase 7d**: Gameplay synchronization
-   - Player position sync (broadcast to all clients)
-   - Player state sync (health, armor, weapons)
-   - Vehicle sync
-7. **Phase 7e**: Android UI
+6. **Phase 7d**: Gameplay synchronization (IN PROGRESS)
+   - ⚠️ **Fix net_android.so crash** - Server segfaults, blocking issue
+   - [ ] **Research CPed/CPlayerPed ARM64 offsets** - Read/write player position
+   - [ ] **Spawn player in multiplayer** - Teleport to spawn when connected
+   - [ ] **Position sync** - Send local pos, receive other players
+   - [ ] **Render other players** - Show synced players in world
+   - Later: Vehicle sync, menu bypass (not urgent)
+7. **Phase 7e**: Android UI (Later)
    - Server browser
    - Chat interface
    - HUD elements
