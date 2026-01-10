@@ -141,13 +141,24 @@ inject_native_library() {
 
     log_info "Injecting MTA native library for ABI: $abi"
 
-    # Check if MTA library exists
-    local mta_lib="${MTA_DIR}/app/build/intermediates/cmake/debug/obj/${abi}/libmta_android.so"
+    # Check if MTA library exists (try multiple possible paths)
+    local mta_lib=""
+    local possible_paths=(
+        "${MTA_DIR}/app/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/${abi}/libmta_android.so"
+        "${MTA_DIR}/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/${abi}/libmta_android.so"
+        "${MTA_DIR}/app/build/intermediates/cxx/Debug/*/obj/${abi}/libmta_android.so"
+        "${MTA_DIR}/app/build/intermediates/cmake/debug/obj/${abi}/libmta_android.so"
+        "${MTA_DIR}/app/build/intermediates/cmake/release/obj/${abi}/libmta_android.so"
+    )
 
-    if [ ! -f "$mta_lib" ]; then
-        # Try release build
-        mta_lib="${MTA_DIR}/app/build/intermediates/cmake/release/obj/${abi}/libmta_android.so"
-    fi
+    for path in "${possible_paths[@]}"; do
+        # Handle glob patterns
+        local found_lib=$(ls $path 2>/dev/null | head -1)
+        if [ -f "$found_lib" ]; then
+            mta_lib="$found_lib"
+            break
+        fi
+    done
 
     if [ ! -f "$mta_lib" ]; then
         log_error "MTA library not found for $abi. Build the project first."
