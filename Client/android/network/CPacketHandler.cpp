@@ -410,6 +410,10 @@ void CPacketHandler::Packet_ServerJoined(NetBitStream& bitStream)
 
     LOGI("CPacketHandler: Joined game with player ID %u", m_localPlayerId);
 
+    // Set local player ID in player manager
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    playerMgr.SetLocalPlayerId(m_localPlayerId);
+
     if (m_callbacks.onConnected)
     {
         m_callbacks.onConnected();
@@ -444,6 +448,8 @@ void CPacketHandler::Packet_PlayerList(NetBitStream& bitStream)
 
     LOGI("CPacketHandler: Received player list with %d players", playerCount);
 
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+
     for (uint16_t i = 0; i < playerCount; ++i)
     {
         uint32_t playerId;
@@ -458,6 +464,9 @@ void CPacketHandler::Packet_PlayerList(NetBitStream& bitStream)
         if (!bitStream.Read(&nickname[0], nicknameLength)) break;
 
         LOGD("CPacketHandler: Player %d: %s", playerId, nickname.c_str());
+
+        // Add to player manager
+        playerMgr.AddPlayer(playerId, nickname);
 
         if (m_callbacks.onPlayerJoin)
         {
@@ -476,6 +485,10 @@ void CPacketHandler::Packet_PlayerJoin(NetBitStream& bitStream)
 
     LOGI("CPacketHandler: Player joined: %s (ID: %u)", nickname.c_str(), playerId);
 
+    // Add to player manager
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    playerMgr.AddPlayer(playerId, nickname);
+
     if (m_callbacks.onPlayerJoin)
     {
         m_callbacks.onPlayerJoin(playerId, nickname);
@@ -491,6 +504,10 @@ void CPacketHandler::Packet_PlayerQuit(NetBitStream& bitStream)
     if (!bitStream.Read(quitReason)) return;
 
     LOGI("CPacketHandler: Player quit: ID %u (reason: %d)", playerId, quitReason);
+
+    // Remove from player manager
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    playerMgr.RemovePlayer(playerId);
 
     if (m_callbacks.onPlayerQuit)
     {
@@ -513,6 +530,11 @@ void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
     if (!bitStream.Read(skinId)) return;
 
     LOGI("CPacketHandler: Player %u spawned at (%.1f, %.1f, %.1f)", playerId, x, y, z);
+
+    // Spawn in player manager
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    Multiplayer::CVector3D pos(x, y, z);
+    playerMgr.SpawnPlayer(playerId, pos, rotation, skinId);
 
     if (m_callbacks.onPlayerSpawn)
     {
@@ -554,22 +576,124 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
 {
     uint32_t playerId;
     uint16_t timeContext;
-    uint16_t flags;
     float x, y, z;
     float rotation;
 
+    // Read player ID first (added by server relay)
     if (!bitStream.Read(playerId)) return;
+
+    // Skip if this is our own sync (server echoing)
+    if (playerId == m_localPlayerId)
+        return;
+
+    // Read time context
     if (!bitStream.Read(timeContext)) return;
-    if (!bitStream.Read(flags)) return;
+
+    // Note: No latency field - packet format matches SendPlayerSync()
+
+    // Read flags (15 bits for player puresync)
+    uint16_t flags = 0;
+    bitStream.ReadBits(reinterpret_cast<uint8_t*>(&flags), 15);
+
+    // Read position
     if (!bitStream.Read(x)) return;
     if (!bitStream.Read(y)) return;
     if (!bitStream.Read(z)) return;
-    if (!bitStream.Read(rotation)) return;
 
-    // Notify callback
+    // Read rotation (16-bit compressed to -PI to PI)
+    uint16_t rotationCompressed;
+    if (!bitStream.Read(rotationCompressed)) return;
+    rotation = (rotationCompressed / 65535.0f * 6.283185f) - 3.141593f;
+
+    // Read velocity (if flag set)
+    float vx = 0, vy = 0, vz = 0;
+    bool hasVelocity = (flags & 0x0400) != 0;  // bSyncingVelocity flag
+    if (hasVelocity)
+    {
+        if (bitStream.ReadBit())  // Has non-zero velocity
+        {
+            bitStream.Read(vx);
+            bitStream.Read(vy);
+            bitStream.Read(vz);
+        }
+    }
+
+    // Read health and armor
+    uint8_t health = 100, armor = 0;
+    bitStream.Read(health);
+    bitStream.Read(armor);
+
+    // Read controller state for animations (MTA format: 0-255, center=128)
+    uint8_t leftStickX = 128, leftStickY = 128;  // Default to center (no movement)
+    uint16_t keyFlags = 0;
+
+    // Derive movement direction from velocity
+    // If the player is moving, calculate analog stick values from velocity direction
+    if (hasVelocity && (vx != 0.0f || vy != 0.0f))
+    {
+        // Calculate movement direction from velocity
+        // velocity.x -> Left/Right, velocity.y -> Up/Down (relative to player facing)
+        // For simplicity, use velocity directly as stick input
+        float speed = sqrtf(vx * vx + vy * vy);
+        if (speed > 0.01f)
+        {
+            // Normalize to -128 to 127 range, then shift to 0-255
+            // Assuming max speed ~20 units/s for running
+            float normalizedX = (vx / 20.0f);
+            float normalizedY = (vy / 20.0f);
+            if (normalizedX > 1.0f) normalizedX = 1.0f;
+            if (normalizedX < -1.0f) normalizedX = -1.0f;
+            if (normalizedY > 1.0f) normalizedY = 1.0f;
+            if (normalizedY < -1.0f) normalizedY = -1.0f;
+
+            // Convert to 0-255 range (128 = center)
+            leftStickX = static_cast<uint8_t>(128 + normalizedX * 127);
+            leftStickY = static_cast<uint8_t>(128 + normalizedY * 127);
+        }
+    }
+
+    // Extract key states from flags
+    // MTA flags map to our key format:
+    // 0x0001 = in water, 0x0002 = on ground, 0x0004 = has jet pack
+    // 0x0008 = ducked, 0x0010 = wearing goggle, 0x0020 = has contact
+    // 0x0040 = choking, 0x0080 = aiming, 0x0100 = first person
+    // 0x0200 = in water (again?), 0x0400 = syncing velocity
+    // Convert relevant flags to key states
+    if (flags & 0x0008) keyFlags |= 0x0002;  // Ducked -> KEY_CROUCH
+    if (flags & 0x0080) keyFlags |= 0x0004;  // Aiming -> KEY_FIRE (aim)
+
+    // Build sync data for player manager
+    Multiplayer::RemoteSyncData syncData;
+    syncData.position = Multiplayer::CVector3D(x, y, z);
+    syncData.velocity = Multiplayer::CVector3D(vx, vy, vz);
+    syncData.rotation = rotation;
+    syncData.health = health;
+    syncData.armor = armor;
+    syncData.syncTimeContext = timeContext;
+    syncData.isOnGround = (flags & 0x0002) != 0;
+    syncData.isInWater = (flags & 0x0001) != 0;
+    syncData.isDucked = (flags & 0x0008) != 0;
+    syncData.controllerLeftStickX = leftStickX;
+    syncData.controllerLeftStickY = leftStickY;
+    syncData.keyFlags = keyFlags;
+
+    // Update player manager
+    auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    playerMgr.UpdatePlayerSync(playerId, syncData);
+
+    // Legacy callback
     if (m_callbacks.onPlayerSync)
     {
         m_callbacks.onPlayerSync(playerId, x, y, z, rotation);
+    }
+
+    // Debug log (occasionally)
+    static int syncLogCount = 0;
+    if (++syncLogCount >= 100)
+    {
+        LOGD("PURESYNC from player %u: pos=(%.1f,%.1f,%.1f) rot=%.2f health=%d",
+             playerId, x, y, z, rotation, health);
+        syncLogCount = 0;
     }
 }
 

@@ -64,10 +64,20 @@ private:
     char m_data[MAX_LENGTH];
 };
 
-struct SNetExtraInfo
+// SNetExtraInfo MUST inherit from CRefCountable to match MTA's ABI!
+// MTA's version is in Server/sdk/net/ns_playerid.h
+class SNetExtraInfo : public CRefCountable
 {
-    bool m_bHasPing = false;
-    unsigned int m_uiPing = 0;
+protected:
+    SNetExtraInfo(const SNetExtraInfo&);
+    const SNetExtraInfo& operator=(const SNetExtraInfo&);
+    ~SNetExtraInfo() {}
+
+public:
+    SNetExtraInfo() : m_bHasPing(false), m_uiPing(0) {}
+
+    bool m_bHasPing;
+    unsigned int m_uiPing;
 };
 
 struct SPacketStat
@@ -388,13 +398,30 @@ namespace RakNetPacketID
     static const uint8_t INCOMPATIBLE_PROTOCOL_VERSION = 0x44;
 }
 
-// MTA packet IDs (after RakNet handshake)
+// Internal MTA packet IDs - MUST match Shared/sdk/net/Packets.h ePacketID enum!
+// These are the IDs we pass to deathmatch.so packet handler
 namespace MTAPacketID
 {
-    static const uint8_t MOD_NAME = 0x1C;  // Server -> Client
-    static const uint8_t PLAYER_JOINDATA = 0x01;  // Client -> Server
-    static const uint8_t SERVER_JOIN_COMPLETE = 0x02;  // Server -> Client
-    static const uint8_t SERVER_JOINEDGAME = 0x16;  // Server -> Client (22)
+    static const uint8_t SERVER_JOIN = 0;
+    static const uint8_t SERVER_JOIN_DATA = 1;
+    static const uint8_t SERVER_JOIN_COMPLETE = 2;
+    static const uint8_t PLAYER_JOIN = 3;
+    static const uint8_t PLAYER_JOINDATA = 4;        // For deathmatch.so handler
+    static const uint8_t PLAYER_QUIT = 5;
+    static const uint8_t PLAYER_TIMEOUT = 6;
+    static const uint8_t MOD_NAME = 7;
+    static const uint8_t SERVER_JOINEDGAME = 21;
+    static const uint8_t SERVER_DISCONNECTED = 22;
+}
+
+// Wire format packet IDs - what the Android client expects on the network
+// These differ from internal IDs!
+namespace WirePacketID
+{
+    static const uint8_t MOD_NAME = 0x1C;            // Server -> Client mod name (28)
+    static const uint8_t SERVER_JOIN_COMPLETE = 0x02; // Server -> Client
+    static const uint8_t SERVER_JOINEDGAME = 0x16;   // Server -> Client (22)
+    static const uint8_t PLAYER_JOINDATA = 0x01;     // Client -> Server (raw packet)
 }
 
 //=============================================================================
@@ -427,6 +454,21 @@ struct ClientConnection
     uint64_t            packetsSent = 0;
     uint64_t            bytesReceived = 0;
     uint64_t            bytesSent = 0;
+};
+
+//=============================================================================
+// Queued Packet - for thread-safe packet processing
+// Network thread queues packets, main thread (DoPulse) processes them
+//=============================================================================
+
+struct QueuedPacket
+{
+    uint8_t             packetID;           // MTA packet ID to pass to handler
+    NetServerPlayerID   playerID;           // Player identifier
+    std::vector<uint8_t> data;              // Packet payload (copied)
+    uint16_t            bitstreamVersion;   // Client's bitstream version
+    bool                hasPing;
+    unsigned int        ping;
 };
 
 //=============================================================================
@@ -564,7 +606,8 @@ private:
     void ProcessIncomingPacket(const uint8_t* data, int length,
                                const struct sockaddr_in& fromAddr);
     void HandleOpenConnectionRequest(const uint8_t* data, int length,
-                                     const struct sockaddr_in& clientAddr);
+                                     const struct sockaddr_in& clientAddr,
+                                     ClientConnection& client);
     void HandleConnectionRequest(const uint8_t* data, int length,
                                  ClientConnection& client);
     void HandleNewIncomingConnection(ClientConnection& client);
@@ -581,6 +624,9 @@ private:
     uint64_t GetTimeMs();
     void LogPacket(const char* direction, const uint8_t* data, int length,
                    const struct sockaddr_in& addr);
+    void QueuePacketForMainThread(uint8_t packetID, const NetServerPlayerID& playerID,
+                                   const uint8_t* data, int length, uint16_t bitstreamVersion);
+    void ProcessQueuedPackets();
 
 private:
     //=========================================================================
@@ -605,6 +651,16 @@ private:
     SPacketStat             m_packetStats[256];
     uint64_t                m_startTime = 0;
     uint64_t                m_serverGUID = 0;
+
+    // Pending PLAYER_JOIN notification (set when RakNet handshake completes)
+    std::atomic<bool>       m_pendingPlayerJoin{false};
+    NetServerPlayerID       m_pendingPlayerJoinPlayerID;
+    uint16_t                m_pendingPlayerJoinBitstreamVersion = 0;
+
+    // Packet queue for thread-safe processing
+    // Network thread adds packets, DoPulse (main thread) processes them
+    std::vector<QueuedPacket> m_packetQueue;
+    std::mutex                m_packetQueueMutex;
 
     static const uint16_t BITSTREAM_VERSION = 0x06B;
 };

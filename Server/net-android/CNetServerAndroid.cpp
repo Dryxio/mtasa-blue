@@ -184,12 +184,13 @@ void CNetServerAndroid::DoPulse()
     static bool firstCall = true;
     if (firstCall)
     {
-        NET_LOG("DoPulse: FIRST CALL");
+        NET_LOG("DoPulse: FIRST CALL - packet queue processing enabled");
         firstCall = false;
     }
 
-    // Process any queued packets for the game thread
-    // Most processing happens in the network thread
+    // CRITICAL: Process queued packets from network thread
+    // This runs in the MAIN THREAD, which is safe for deathmatch.so
+    ProcessQueuedPackets();
 
     // Check for timed-out clients
     uint64_t now = GetTimeMs();
@@ -201,7 +202,7 @@ void CNetServerAndroid::DoPulse()
 
     if (now - lastLogTime > 10000)  // Log every 10 seconds
     {
-        NET_LOG("DoPulse: %d calls, %zu clients", pulseCount, m_clients.size());
+        NET_LOG("DoPulse: %d calls, %zu clients, queue processing active", pulseCount, m_clients.size());
         lastLogTime = now;
     }
 
@@ -367,13 +368,27 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
     uint8_t packetID = data[0];
     LogPacket("<-", data, length, fromAddr);
 
-    // Get or create client
-    auto* client = GetOrCreateClient(fromAddr);
-    if (!client)
+    // Get or create client - hold lock for entire packet processing
+    // to prevent DoPulse from removing the client while we're using it
+    std::unique_lock<std::mutex> lock(m_clientsMutex);
+
+    NetServerPlayerID playerID = MakePlayerID(fromAddr);
+    uint64_t key = ((uint64_t)playerID.GetBinaryAddress() << 16) | playerID.GetPort();
+
+    auto it = m_clients.find(key);
+    if (it == m_clients.end())
     {
-        NET_LOG("Failed to get/create client");
-        return;
+        // Create new client
+        ClientConnection newClient;
+        newClient.playerID = playerID;
+        newClient.state = ClientState::DISCONNECTED;
+        newClient.connectTime = GetTimeMs();
+        newClient.lastPacketTime = GetTimeMs();
+        m_clients[key] = newClient;
+        it = m_clients.find(key);
     }
+
+    ClientConnection* client = &it->second;
 
     client->lastPacketTime = GetTimeMs();
     client->packetsReceived++;
@@ -390,6 +405,19 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
         // This is PLAYER_JOINDATA, not a PING
         NET_LOG("   -> Handling as PLAYER_JOINDATA (state=AWAITING_JOINDATA)");
         HandlePlayerJoinData(data, length, *client);
+
+        // Copy data we need before releasing lock
+        NetServerPlayerID copyPlayerID = client->playerID;
+        uint16_t copyBitstreamVersion = client->bitstreamVersion;
+
+        // Release lock
+        lock.unlock();
+
+        // QUEUE packet for main thread processing (instead of calling handler directly)
+        // This avoids the deadlock with CSimPlayerManager::m_CS mutex
+        NET_LOG("*** QUEUING PLAYER_JOINDATA for main thread ***");
+        QueuePacketForMainThread(MTAPacketID::PLAYER_JOINDATA, copyPlayerID,
+                                  data + 1, length - 1, copyBitstreamVersion);
         return;
     }
 
@@ -417,10 +445,11 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
     switch (packetID)
     {
         case RakNetPacketID::OPEN_CONNECTION_REQUEST:
-            HandleOpenConnectionRequest(data, length, fromAddr);
+            HandleOpenConnectionRequest(data, length, fromAddr, *client);
             break;
 
         case RakNetPacketID::CONNECTION_REQUEST:
+            // Handle connection request - this sends CONNECTION_REQUEST_ACCEPTED and MOD_NAME
             HandleConnectionRequest(data, length, *client);
             break;
 
@@ -462,9 +491,30 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
         }
 
         case RakNetPacketID::NEW_INCOMING_CONNECTION:
+        {
             // Client confirmed connection
             HandleNewIncomingConnection(*client);
+
+            // Check if we need to notify deathmatch.so about the new player
+            if (m_pendingPlayerJoin)
+            {
+                m_pendingPlayerJoin = false;
+
+                // Copy data we need
+                NetServerPlayerID joinPlayerID = m_pendingPlayerJoinPlayerID;
+                uint16_t joinBitstreamVersion = m_pendingPlayerJoinBitstreamVersion;
+
+                // Release lock
+                lock.unlock();
+
+                // QUEUE for main thread (instead of calling handler directly)
+                NET_LOG("*** QUEUING PLAYER_JOIN for main thread ***");
+                QueuePacketForMainThread(MTAPacketID::PLAYER_JOIN, joinPlayerID,
+                                          nullptr, 0, joinBitstreamVersion);
+                return;  // Exit early since lock is released
+            }
             break;
+        }
 
         case RakNetPacketID::DISCONNECTION_NOTIFICATION:
         case RakNetPacketID::CONNECTION_LOST:
@@ -473,30 +523,28 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
             NET_LOG("Client disconnected (packet 0x%02X): %s:%d",
                     packetID, inet_ntoa(fromAddr.sin_addr), ntohs(fromAddr.sin_port));
 
-            // Copy playerID before removing (client pointer becomes invalid after erase)
-            NetServerPlayerID playerID = client->playerID;
+            // Copy data we need before releasing lock
+            NetServerPlayerID copyPlayerID = client->playerID;
+            uint16_t copyBitstreamVersion = client->bitstreamVersion;
+            bool wasConnected = (client->state == ClientState::CONNECTED);
 
-            // Notify the game module about the disconnect BEFORE removing
-            // This allows deathmatch.so to clean up its player references
-            if (m_pfnPacketHandler && client->state == ClientState::CONNECTED)
+            // Remove client from map while holding lock
+            m_clients.erase(key);
+            NET_LOG("   Client removed from map");
+
+            // Release lock
+            lock.unlock();
+
+            // QUEUE disconnect notification for main thread
+            if (wasConnected)
             {
-                NET_LOG("   Notifying game module of disconnect...");
-                // Create empty bitstream for disconnect notification
-                auto* bitStream = new CNetBitStreamAndroid(nullptr, 0, client->bitstreamVersion);
-                SNetExtraInfo extraInfo;
-                extraInfo.m_bHasPing = false;
-                extraInfo.m_uiPing = 0;
-
-                // Send DISCONNECTION_NOTIFICATION to game module
-                m_pfnPacketHandler(RakNetPacketID::DISCONNECTION_NOTIFICATION, playerID, bitStream, &extraInfo);
-
-                bitStream->Release();
+                NET_LOG("*** QUEUING DISCONNECTION for main thread ***");
+                QueuePacketForMainThread(RakNetPacketID::DISCONNECTION_NOTIFICATION,
+                                          copyPlayerID, nullptr, 0, copyBitstreamVersion);
             }
 
-            // Now safe to remove the client
-            RemoveClient(playerID);
-            NET_LOG("   Client removed successfully");
-            break;
+            NET_LOG("   Client disconnect handled successfully");
+            return;  // Exit early since lock is released
         }
 
         default:
@@ -505,22 +553,22 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
             if (client->state == ClientState::CONNECTED ||
                 client->state == ClientState::AWAITING_JOINDATA)
             {
-                if (m_pfnPacketHandler)
-                {
-                    // Create bitstream from data
-                    auto* bitStream = new CNetBitStreamAndroid(data + 1, length - 1,
-                                                               client->bitstreamVersion);
-                    SNetExtraInfo extraInfo;
-                    extraInfo.m_bHasPing = true;
-                    extraInfo.m_uiPing = 50;  // Placeholder
+                // Copy data we need before releasing lock
+                NetServerPlayerID copyPlayerID = client->playerID;
+                uint16_t copyBitstreamVersion = client->bitstreamVersion;
 
-                    m_pfnPacketHandler(packetID, client->playerID, bitStream, &extraInfo);
+                // Release lock
+                lock.unlock();
 
-                    bitStream->Release();
-                }
+                // QUEUE for main thread
+                NET_LOG("*** QUEUING game packet 0x%02X for main thread ***", packetID);
+                QueuePacketForMainThread(packetID, copyPlayerID,
+                                          data + 1, length - 1, copyBitstreamVersion);
+                return;  // Exit early since lock is released
             }
             break;
     }
+    // Lock automatically released at end of function
 }
 
 //=============================================================================
@@ -528,8 +576,11 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
 //=============================================================================
 
 void CNetServerAndroid::HandleOpenConnectionRequest(const uint8_t* data, int length,
-                                                     const sockaddr_in& clientAddr)
+                                                     const sockaddr_in& clientAddr,
+                                                     ClientConnection& client)
 {
+    // NOTE: This function is called with the clients mutex held!
+
     // MTA RakNet 3.x OPEN_CONNECTION_REQUEST format:
     // 1 byte: packet ID (0x09)
     // 4 bytes: cookie (little-endian)
@@ -547,12 +598,8 @@ void CNetServerAndroid::HandleOpenConnectionRequest(const uint8_t* data, int len
             inet_ntoa(clientAddr.sin_addr), ntohs(clientAddr.sin_port), cookie);
 
     // Store cookie for this client
-    auto* client = GetOrCreateClient(clientAddr);
-    if (client)
-    {
-        client->cookie = cookie;
-        client->state = ClientState::HANDSHAKE_OPEN_REQUEST;
-    }
+    client.cookie = cookie;
+    client.state = ClientState::HANDSHAKE_OPEN_REQUEST;
 
     // Send OPEN_CONNECTION_REPLY
     uint8_t reply[5];
@@ -667,8 +714,11 @@ void CNetServerAndroid::HandleConnectionRequest(const uint8_t* data, int length,
     SendRawPacket(reply, offset, destAddr);
     NET_LOG("-> Sent CONNECTION_REQUEST_ACCEPTED (%d bytes)", offset);
 
-    // Android client doesn't send NEW_INCOMING_CONNECTION, so send MOD_NAME immediately
+    // Update state - waiting for joindata after MOD_NAME is sent
     client.state = ClientState::AWAITING_JOINDATA;
+
+    // Send MOD_NAME directly - this is simpler and avoids ABI issues with calling deathmatch.so
+    // deathmatch.so's Packet_PlayerJoin() also just sends MOD_NAME, so this is equivalent
     SendModName(client);
 }
 
@@ -677,11 +727,18 @@ void CNetServerAndroid::HandleNewIncomingConnection(ClientConnection& client)
     NET_LOG("NEW_INCOMING_CONNECTION from client");
 
     // Client has confirmed connection - some clients send this, some don't
-    // MOD_NAME already sent after CONNECTION_REQUEST_ACCEPTED
+    // Note: We already set pending PLAYER_JOIN in HandleConnectionRequest
+    // so if it hasn't been processed yet, it will be handled then.
+    // If it was already processed, deathmatch.so already sent MOD_NAME.
     if (client.state != ClientState::AWAITING_JOINDATA)
     {
         client.state = ClientState::AWAITING_JOINDATA;
-        SendModName(client);
+
+        // Set pending PLAYER_JOIN flag - will be processed after lock is released
+        m_pendingPlayerJoin = true;
+        m_pendingPlayerJoinPlayerID = client.playerID;
+        m_pendingPlayerJoinBitstreamVersion = client.bitstreamVersion;
+        NET_LOG("-> Marked PLAYER_JOIN pending (NEW_INCOMING_CONNECTION path)");
     }
 }
 
@@ -703,7 +760,7 @@ void CNetServerAndroid::SendModName(const ClientConnection& client)
     uint8_t packet[64];
     int offset = 0;
 
-    packet[offset++] = MTAPacketID::MOD_NAME;
+    packet[offset++] = WirePacketID::MOD_NAME;  // 0x1C on the wire
 
     // Bitstream version (little-endian)
     packet[offset++] = BITSTREAM_VERSION & 0xFF;
@@ -729,9 +786,12 @@ void CNetServerAndroid::SendModName(const ClientConnection& client)
 void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
                                               ClientConnection& client)
 {
+    // NOTE: This function is called with the clients mutex held!
+    // DO NOT call m_pfnPacketHandler here - the caller handles that after releasing the lock.
+
     NET_LOG("Received PLAYER_JOINDATA (%d bytes)", length);
 
-    // Parse join data
+    // Parse join data to extract bitstream version
     if (length >= 7)
     {
         int offset = 1;  // Skip packet ID
@@ -757,25 +817,11 @@ void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
     // Mark as connected
     client.state = ClientState::CONNECTED;
 
-    // Send JOIN_COMPLETE
-    SendJoinComplete(client);
+    // NOTE: We no longer send JOIN_COMPLETE/JOINED_GAME manually here.
+    // deathmatch.so will handle that via Packet_PlayerJoinData() -> our SendPacket()
+    // The caller (ProcessIncomingPacket) will call the packet handler with PLAYER_JOINDATA
 
-    // Notify packet handler (for deathmatch mod)
-    if (m_pfnPacketHandler)
-    {
-        auto* bitStream = new CNetBitStreamAndroid(data + 1, length - 1,
-                                                   client.bitstreamVersion);
-        SNetExtraInfo extraInfo;
-        extraInfo.m_bHasPing = true;
-        extraInfo.m_uiPing = 50;
-
-        m_pfnPacketHandler(MTAPacketID::PLAYER_JOINDATA, client.playerID,
-                          bitStream, &extraInfo);
-
-        bitStream->Release();
-    }
-
-    NET_LOG("*** CLIENT CONNECTED SUCCESSFULLY ***");
+    NET_LOG("*** CLIENT JOINDATA RECEIVED - waiting for deathmatch.so to process ***");
 }
 
 void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
@@ -791,7 +837,7 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
     uint8_t packet[64];
     int offset = 0;
 
-    packet[offset++] = MTAPacketID::SERVER_JOIN_COMPLETE;
+    packet[offset++] = WirePacketID::SERVER_JOIN_COMPLETE;  // 0x02 on the wire
 
     // Version string length (little-endian)
     packet[offset++] = versionLen & 0xFF;
@@ -822,7 +868,7 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
     uint8_t joinedPacket[10];
     offset = 0;
 
-    joinedPacket[offset++] = MTAPacketID::SERVER_JOINEDGAME;
+    joinedPacket[offset++] = WirePacketID::SERVER_JOINEDGAME;  // 0x16 on the wire
 
     // Player ID (little-endian uint16)
     uint16_t playerIndex = 1;  // TODO: Track properly
@@ -899,6 +945,87 @@ void CNetServerAndroid::RegisterPacketHandler(PPACKETHANDLER pfnPacketHandler)
 }
 
 //=============================================================================
+// Packet Queue - Thread-Safe Processing
+// Network thread queues packets, main thread (DoPulse) processes them
+//=============================================================================
+
+void CNetServerAndroid::QueuePacketForMainThread(uint8_t packetID,
+                                                   const NetServerPlayerID& playerID,
+                                                   const uint8_t* data, int length,
+                                                   uint16_t bitstreamVersion)
+{
+    QueuedPacket packet;
+    packet.packetID = packetID;
+    packet.playerID = playerID;
+    packet.bitstreamVersion = bitstreamVersion;
+    packet.hasPing = true;
+    packet.ping = 50;  // Placeholder
+
+    // Copy packet data
+    if (data && length > 0)
+    {
+        packet.data.resize(length);
+        memcpy(packet.data.data(), data, length);
+    }
+
+    // Add to queue (thread-safe)
+    {
+        std::lock_guard<std::mutex> lock(m_packetQueueMutex);
+        m_packetQueue.push_back(std::move(packet));
+    }
+
+    NET_LOG("*** QUEUED packet ID=%d for main thread (queue size now: %zu) ***",
+            packetID, m_packetQueue.size());
+}
+
+void CNetServerAndroid::ProcessQueuedPackets()
+{
+    // Swap the queue to minimize lock time
+    std::vector<QueuedPacket> packetsToProcess;
+    {
+        std::lock_guard<std::mutex> lock(m_packetQueueMutex);
+        if (m_packetQueue.empty())
+            return;
+        packetsToProcess.swap(m_packetQueue);
+    }
+
+    NET_LOG("*** PROCESSING %zu queued packets in MAIN THREAD ***", packetsToProcess.size());
+
+    // Process each packet (now in main thread - safe for deathmatch.so)
+    for (const auto& packet : packetsToProcess)
+    {
+        if (!m_pfnPacketHandler)
+        {
+            NET_LOG("*** ERROR: No packet handler registered! ***");
+            continue;
+        }
+
+        NET_LOG("*** MAIN THREAD: Processing packet ID=%d ***", packet.packetID);
+
+        // Create bitstream from queued data
+        auto* bitStream = new CNetBitStreamAndroid(
+            packet.data.empty() ? nullptr : packet.data.data(),
+            packet.data.size(),
+            packet.bitstreamVersion);
+
+        auto* extraInfo = new SNetExtraInfo();
+        extraInfo->m_bHasPing = packet.hasPing;
+        extraInfo->m_uiPing = packet.ping;
+
+        NET_LOG("*** MAIN THREAD: Calling deathmatch.so handler (packetID=%d, version=0x%04X) ***",
+                packet.packetID, packet.bitstreamVersion);
+
+        // Call the packet handler - THIS IS NOW IN THE MAIN THREAD
+        m_pfnPacketHandler(packet.packetID, packet.playerID, bitStream, extraInfo);
+
+        NET_LOG("*** MAIN THREAD: Handler returned successfully ***");
+
+        bitStream->Release();
+        extraInfo->Release();
+    }
+}
+
+//=============================================================================
 // Sending Packets
 //=============================================================================
 
@@ -920,10 +1047,32 @@ bool CNetServerAndroid::SendPacket(unsigned char ucPacketID,
     if (!bitStream)
         return false;
 
+    // Convert internal packet IDs to wire format
+    // deathmatch.so uses internal IDs, but the Android client expects wire format
+    unsigned char wirePacketID = ucPacketID;
+    switch (ucPacketID)
+    {
+        case MTAPacketID::MOD_NAME:  // 7 -> 0x1C
+            wirePacketID = WirePacketID::MOD_NAME;
+            NET_LOG("SendPacket: Converting MOD_NAME (7 -> 0x1C)");
+            break;
+        case MTAPacketID::SERVER_JOIN_COMPLETE:  // 2 -> 0x02 (same, but log it)
+            wirePacketID = WirePacketID::SERVER_JOIN_COMPLETE;
+            NET_LOG("SendPacket: SERVER_JOIN_COMPLETE (2 -> 0x02)");
+            break;
+        case MTAPacketID::SERVER_JOINEDGAME:  // 21 -> 0x16
+            wirePacketID = WirePacketID::SERVER_JOINEDGAME;
+            NET_LOG("SendPacket: Converting SERVER_JOINEDGAME (21 -> 0x16)");
+            break;
+        default:
+            NET_LOG("SendPacket: Packet ID 0x%02X (no conversion)", ucPacketID);
+            break;
+    }
+
     // Build packet: ID + data
     int dataSize = bitStream->GetNumberOfBytesUsed();
     std::vector<uint8_t> packet(1 + dataSize);
-    packet[0] = ucPacketID;
+    packet[0] = wirePacketID;
 
     if (dataSize > 0)
     {
@@ -1220,8 +1369,10 @@ void CNetServerAndroid::GetClientSerialAndVersion(const NetServerPlayerID& playe
     char* extraPtr = reinterpret_cast<char*>(&strExtra);
     char* versionPtr = reinterpret_cast<char*>(&strVersion);
 
-    // Default values
-    strncpy(serialPtr, "ANDROID0000000000000000000000000", 31);
+    // Default serial - MUST be exactly 32 hex characters (A-F, 0-9 only!)
+    // "ANDROID" is INVALID because N,D,R,I are not hex
+    // Use A1D01D prefix (looks like ANDROID in hex-speak)
+    strncpy(serialPtr, "A1D01D00000000000000000000000000", 31);
     serialPtr[31] = '\0';
     extraPtr[0] = '\0';
     strncpy(versionPtr, "1.6.0", 31);
@@ -1230,12 +1381,15 @@ void CNetServerAndroid::GetClientSerialAndVersion(const NetServerPlayerID& playe
     auto* client = GetClient(playerID);
     if (client)
     {
-        // Create serial from GUID
+        // Create serial from GUID - pure hex format!
+        // Use A1D01D prefix (8 chars) + 24 hex chars from GUID = 32 hex chars
         char serial[33];
-        snprintf(serial, sizeof(serial), "ANDROID%024llX",
+        snprintf(serial, sizeof(serial), "A1D01D00%024llX",
                  (unsigned long long)client->guid);
         strncpy(serialPtr, serial, 31);
         serialPtr[31] = '\0';
+
+        NET_LOG("Generated serial for client: %.32s", serialPtr);
     }
 }
 

@@ -347,9 +347,9 @@ public class TestActivity extends Activity {
     }
 
     private void runServerConnectionTest() {
-        // MTA server with net_android.so module
-        final String serverHost = "37.59.101.35";  // VPS MTA server
-        final int serverPort = 22004;  // MTA server port (net_android.so integrated)
+        // Local test server (host machine from Genymotion VM)
+        final String serverHost = "10.0.3.2";  // Host machine IP from Genymotion
+        final int serverPort = 22003;  // Default MTA port
 
         setRunning(true);
         statusText.setText("Testing server connection...");

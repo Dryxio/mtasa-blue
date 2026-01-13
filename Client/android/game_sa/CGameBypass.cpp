@@ -5,6 +5,7 @@
  */
 
 #include "CGameBypass.h"
+#include "../multiplayer/CPedFactory.h"
 #include <android/log.h>
 #include <cstring>
 
@@ -200,24 +201,57 @@ void CGameBypass::Process()
     if (!m_initialized)
         return;
 
+    // Process pending ped operations (SetModelIndex, etc.)
+    // These need to be called from the game context, not network thread
+    if (IsGamePlaying())
+    {
+        auto& pedFactory = MTA::Android::Multiplayer::CPedFactory::GetInstance();
+        if (pedFactory.HasPendingOperations())
+        {
+            int processed = pedFactory.ProcessPendingOperations();
+            if (processed > 0)
+            {
+                LOGI("Processed %d pending ped operations from game thread", processed);
+            }
+        }
+    }
+
     // Auto-spawn when game is ready (with delay to let cutscenes/loading finish)
     if (m_waitingForSpawn && !m_playerSpawned)
     {
         if (IsGameReadyForSpawn())
         {
-            // Wait for 300 frames (~5 seconds at 60fps) before spawning
-            // This gives time for cutscenes and loading to complete
+            // Process() is called every 100ms from thread, so:
+            // 30 calls = 3 seconds delay (enough for game to stabilize)
             m_spawnDelayFrames++;
 
             if (m_spawnDelayFrames == 1)
             {
-                LOGI("Game ready - waiting 5 seconds before spawn...");
+                LOGI("Game ready - waiting 3 seconds before spawn (frame=%d)...", m_spawnDelayFrames);
             }
 
-            if (m_spawnDelayFrames >= 300)
+            // Log progress every 10 calls (1 second)
+            if (m_spawnDelayFrames % 10 == 0)
+            {
+                LOGI("Spawn delay: frame %d/30", m_spawnDelayFrames);
+            }
+
+            if (m_spawnDelayFrames >= 30)
             {
                 LOGI("Delay complete - triggering spawn (frame %d)", m_spawnDelayFrames);
                 SpawnLocalPlayerDefault();
+            }
+        }
+        else
+        {
+            // Log why we're not ready (periodically)
+            static int notReadyCounter = 0;
+            if (++notReadyCounter >= 20)  // Every 2 seconds
+            {
+                void* pPed = GetLocalPlayerPed();
+                LOGI("NOT ready for spawn: state=%d, pPed=%p",
+                     (int)GetGameState(), pPed);
+                notReadyCounter = 0;
             }
         }
     }

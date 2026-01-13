@@ -14,35 +14,98 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <pthread.h>
 
 // Forward declare ISyncStructure
 struct ISyncStructure;
 
-// Simple reference counting base
-class CRefCountableSimple
+//=============================================================================
+// CCriticalSection - Thread synchronization primitive
+// MUST match MTA's CCriticalSection memory layout and behavior!
+// deathmatch.so calls Lock() and Unlock() on this object.
+//=============================================================================
+class CCriticalSection
 {
 public:
-    CRefCountableSimple() : m_refCount(1) {}
-    virtual ~CRefCountableSimple() {}
-
-    void AddRef() { m_refCount++; }
-    void Release()
+    CCriticalSection()
     {
-        if (--m_refCount == 0)
+        m_pCriticalSection = new pthread_mutex_t;
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(static_cast<pthread_mutex_t*>(m_pCriticalSection), &attr);
+        pthread_mutexattr_destroy(&attr);
+    }
+
+    ~CCriticalSection()
+    {
+        if (m_pCriticalSection)
         {
-            delete this;
+            pthread_mutex_destroy(static_cast<pthread_mutex_t*>(m_pCriticalSection));
+            delete static_cast<pthread_mutex_t*>(m_pCriticalSection);
         }
     }
 
+    void Lock()
+    {
+        if (m_pCriticalSection)
+            pthread_mutex_lock(static_cast<pthread_mutex_t*>(m_pCriticalSection));
+    }
+
+    void Unlock()
+    {
+        if (m_pCriticalSection)
+            pthread_mutex_unlock(static_cast<pthread_mutex_t*>(m_pCriticalSection));
+    }
+
 private:
-    std::atomic<int> m_refCount;
+    void* m_pCriticalSection;  // pthread_mutex_t* on Linux
+};
+
+//=============================================================================
+// CRefCountable - Reference counting base class
+// MUST match MTA's CRefCountable memory layout and behavior!
+// Memory layout: [ vtable_ptr | m_iRefCount | m_pCS ]
+// deathmatch.so expects m_pCS to point to a valid CCriticalSection!
+//=============================================================================
+class CRefCountable
+{
+    int                m_iRefCount;
+    CCriticalSection*  m_pCS;
+    static CCriticalSection ms_CS;  // Static critical section shared by all instances
+
+protected:
+    virtual ~CRefCountable() {}
+
+public:
+    CRefCountable() : m_iRefCount(1), m_pCS(&ms_CS) {}
+
+    void AddRef()
+    {
+        m_pCS->Lock();
+        ++m_iRefCount;
+        m_pCS->Unlock();
+    }
+
+    int Release()
+    {
+        m_pCS->Lock();
+        int newCount = --m_iRefCount;
+        m_pCS->Unlock();
+
+        if (newCount == 0)
+        {
+            delete this;
+        }
+        return newCount;
+    }
 };
 
 //=============================================================================
 // NetBitStreamInterface - Simplified version for server
 //=============================================================================
 
-class NetBitStreamInterface : public CRefCountableSimple
+class NetBitStreamInterface : public CRefCountable
 {
 public:
     virtual int  GetReadOffsetAsBits() = 0;
@@ -118,6 +181,84 @@ public:
 
     virtual unsigned char* GetData() const = 0;
     virtual unsigned short Version() const = 0;
+
+    //=========================================================================
+    // String reading methods - Required by deathmatch.so CPlayerJoinDataPacket
+    // These are inline template methods matching MTA's Shared/sdk/net/bitstream.h
+    //=========================================================================
+
+    // Check if we can read N bytes
+    bool CanReadNumberOfBytes(unsigned int uiLength) const
+    {
+        return (GetNumberOfUnreadBits() >= (int)(uiLength * 8));
+    }
+
+    // Read characters into a std::string (no length prefix)
+    bool ReadStringCharacters(std::string& result, unsigned int uiLength)
+    {
+        printf("[bitstream] ReadStringCharacters(length=%u)\n", uiLength);
+        fflush(stdout);
+        result = "";
+        if (uiLength)
+        {
+            if (!CanReadNumberOfBytes(uiLength))
+            {
+                printf("[bitstream]   -> FAILED: not enough bytes (have %d bits, need %u)\n",
+                       GetNumberOfUnreadBits(), uiLength * 8);
+                fflush(stdout);
+                return false;
+            }
+            std::vector<char> bufferArray;
+            bufferArray.resize(uiLength);
+            char* buffer = &bufferArray[0];
+            if (!Read(buffer, uiLength))
+            {
+                printf("[bitstream]   -> FAILED: Read() returned false\n");
+                fflush(stdout);
+                return false;
+            }
+            result = std::string(buffer, uiLength);
+            printf("[bitstream]   -> SUCCESS: read '%s'\n", result.c_str());
+            fflush(stdout);
+        }
+        return true;
+    }
+
+    // Read a string with ushort length prefix (default)
+    template <typename SizeType = unsigned short>
+    bool ReadString(std::string& result)
+    {
+        printf("[bitstream] ReadString<SizeType>() at bit %d\n", GetReadOffsetAsBits());
+        fflush(stdout);
+        result = "";
+        SizeType length = 0;
+        if (!Read(length))
+        {
+            printf("[bitstream]   -> FAILED: couldn't read length\n");
+            fflush(stdout);
+            return false;
+        }
+        printf("[bitstream]   -> length=%u, calling ReadStringCharacters\n", (unsigned)length);
+        fflush(stdout);
+        return ReadStringCharacters(result, length);
+    }
+
+    // Write a string with ushort length prefix
+    template <typename SizeType = unsigned short>
+    void WriteString(const std::string& value)
+    {
+        SizeType length = static_cast<SizeType>(value.length());
+        Write(length);
+        if (length > 0)
+            Write(value.c_str(), length);
+    }
+
+    // Write string characters (no length prefix)
+    void WriteStringCharacters(const std::string& value, unsigned int uiLength)
+    {
+        if (uiLength > 0 && uiLength <= value.length())
+            Write(value.c_str(), uiLength);
+    }
 };
 
 //=============================================================================

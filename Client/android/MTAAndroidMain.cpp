@@ -17,6 +17,10 @@
 #include "game_sa/CPlayerSync.h"
 #include "game_sa/CGameBypass.h"
 #include "network/CServerConnection.h"
+#include "network/CPacketHandler.h"
+#include "multiplayer/CPlayerManager.h"
+#include "multiplayer/CPedFactory.h"
+#include "multiplayer/CWorldPlayers.h"
 #include <thread>
 #include <memory>
 #include <atomic>
@@ -59,12 +63,21 @@ namespace MTA::Android
     // Player sync
     static std::unique_ptr<Sync::CPlayerSync> g_playerSync;
 
+    // Packet handler (processes incoming server packets)
+    static std::unique_ptr<Network::CPacketHandler> g_packetHandler;
+
     // Game bypass (auto-spawn)
     static bool g_gameBypassInitialized = false;
+
+    // Player manager processing
+    static std::thread g_playerManagerThread;
+    static std::atomic<bool> g_playerManagerRunning{false};
 
     // Forward declarations
     void StartPlayerSync();
     void InitializeGameBypass();
+    void EarlyInitializePedFactory();
+    void StartPlayerManagerProcessing();
 
     // =============================================================================
     // Library Detection
@@ -241,23 +254,46 @@ namespace MTA::Android
             return;
         }
 
-        // Process connection until done or stopped
+        // Process connection until stopped
+        // IMPORTANT: Keep running even after CONNECTED to handle ongoing network I/O
+        auto lastKeepalive = std::chrono::steady_clock::now();
+        int keepaliveCount = 0;
+
         while (g_connectionRunning.load())
         {
             g_serverConnection->Process();
 
-            // Check connection state
+            // Check for error or disconnect - only exit on these
             auto state = g_serverConnection->GetState();
-            if (state == Network::ServerConnectionState::CONNECTED ||
-                state == Network::ServerConnectionState::ERROR_STATE ||
+            if (state == Network::ServerConnectionState::ERROR_STATE ||
                 state == Network::ServerConnectionState::DISCONNECTED)
             {
-                // Connection complete or failed
+                LOGI("Connection ended: state=%d", (int)state);
                 break;
             }
 
+            // Send keepalive packets while connected (every 5 seconds)
+            // This prevents server timeout while waiting for game to load
+            if (state == Network::ServerConnectionState::CONNECTED)
+            {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastKeepalive).count();
+
+                if (elapsed >= 5000)  // Every 5 seconds
+                {
+                    // Send a minimal PURESYNC packet as keepalive (position 0,0,0)
+                    g_serverConnection->SendPlayerSync(0, 0, 0, 0, 0, 0, 0, true);
+                    lastKeepalive = now;
+
+                    if (++keepaliveCount % 3 == 0)  // Log every 3rd keepalive (every 15 seconds)
+                    {
+                        LOGI("Sent keepalive packet #%d (waiting for game to spawn player)", keepaliveCount);
+                    }
+                }
+            }
+
             // Small delay to avoid busy loop
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
         LOGI("Connection thread finished, state: %d", (int)g_serverConnection->GetState());
@@ -276,15 +312,19 @@ namespace MTA::Android
         // Create server connection if needed
         if (!g_serverConnection)
         {
+            LOGI(">>> Creating g_serverConnection...");
             g_serverConnection = std::make_unique<Network::CServerConnection>();
+            LOGI(">>> g_serverConnection created: %p", g_serverConnection.get());
         }
 
         // Initialize
+        LOGI(">>> Calling g_serverConnection->Initialize()...");
         if (!g_serverConnection->Initialize())
         {
             LOGE("Failed to initialize server connection");
             return false;
         }
+        LOGI(">>> g_serverConnection->Initialize() succeeded");
 
         // Set up callbacks
         Network::ConnectionCallbacks callbacks;
@@ -309,6 +349,40 @@ namespace MTA::Android
             LOGE("Connection error: %s", error.c_str());
         };
         g_serverConnection->SetCallbacks(callbacks);
+
+        // Initialize packet handler to process incoming server packets
+        LOGI(">>> About to init packet handler...");
+        Network::CNetAndroid* network = g_serverConnection->GetNetwork();
+        LOGI(">>> GetNetwork() returned: %p", network);
+
+        if (!g_packetHandler)
+        {
+            LOGI(">>> Creating g_packetHandler...");
+            g_packetHandler = std::make_unique<Network::CPacketHandler>();
+            LOGI(">>> g_packetHandler created: %p", g_packetHandler.get());
+        }
+
+        LOGI(">>> Calling g_packetHandler->Initialize(network)...");
+        if (!g_packetHandler->Initialize(network))
+        {
+            LOGE("Failed to initialize packet handler");
+            return false;
+        }
+        LOGI(">>> g_packetHandler->Initialize() succeeded");
+
+        // Register packet handler with the network layer
+        LOGI(">>> Registering packet handler with network layer...");
+        network->RegisterPacketHandler(
+            [](Network::PacketID id, Network::NetBitStream& bitStream) {
+                if (g_packetHandler)
+                {
+                    return g_packetHandler->ProcessPacket(id, bitStream);
+                }
+                return false;
+            }
+        );
+
+        LOGI(">>> Packet handler initialized and registered!");
 
         // Server info - VPS MTA server with net_android.so
         Network::ServerInfo server;
@@ -381,17 +455,28 @@ namespace MTA::Android
         std::thread([]() {
             LOGI("Game bypass processing thread started");
             auto& bypass = Game::CGameBypass::GetInstance();
+            auto& worldPlayers = Multiplayer::CWorldPlayers::GetInstance();
 
             while (g_initialized)
             {
+                // CRITICAL: Verify CWorld::Players patch is still in place!
+                // The game's DoGameRestart/CGame::InitialiseWhenRestarting can overwrite it!
+                if (worldPlayers.IsPatched())
+                {
+                    worldPlayers.VerifyAndRepairPatch();
+                }
+
                 // Process game bypass (checks for game ready and triggers spawn)
                 bypass.Process();
+
+                // Update player manager with current game state
+                auto state = bypass.GetGameState();
+                Multiplayer::CPlayerManager::GetInstance().OnGameStateChange((int)state);
 
                 // Log game state periodically
                 static int logCounter = 0;
                 if (++logCounter >= 50)  // Every 5 seconds
                 {
-                    auto state = bypass.GetGameState();
                     LOGI("Game state: %d, Ready: %s, Spawned: %s",
                          (int)state,
                          bypass.IsGameReadyForSpawn() ? "yes" : "no",
@@ -408,6 +493,99 @@ namespace MTA::Android
     }
 
     /**
+     * Initialize the CWorld::Players patch and ped factory EARLY
+     * This should be called as soon as the game base is known,
+     * BEFORE any player sync processing to avoid race conditions.
+     *
+     * The Device 2 crash at 0x18f happens because:
+     * - 0x18f = offset of bCanDoDriveBy in CPlayerInfoGta
+     * - The game's main loop accesses CWorld::Players[0].bCanDoDriveBy
+     * - If CWorld::Players pointer is NULL/bad, crash at fault addr 0x18f
+     */
+    void EarlyInitializePedFactory()
+    {
+        static bool earlyInitDone = false;
+        if (earlyInitDone)
+            return;
+
+        LOGI("=== EARLY Ped Factory + CWorld::Players Patch ===");
+
+        if (!g_gtasaLib.loaded)
+        {
+            LOGE("Cannot early-init ped factory: GTA:SA not loaded yet");
+            return;
+        }
+
+        // Initialize ped factory NOW - this applies the CWorld::Players patch
+        // This must happen before the game's main loop tries to access Players
+        auto& pedFactory = Multiplayer::CPedFactory::GetInstance();
+        if (!pedFactory.Initialize(g_gtasaLib.base))
+        {
+            LOGE("CRITICAL: Failed to initialize ped factory early!");
+            // Continue anyway - we'll try again later
+        }
+        else
+        {
+            LOGI("Ped factory + CWorld::Players patch applied EARLY (before sync)");
+        }
+
+        earlyInitDone = true;
+    }
+
+    /**
+     * Start player manager processing thread
+     * This handles interpolation and updates for all remote players
+     */
+    void StartPlayerManagerProcessing()
+    {
+        if (g_playerManagerRunning.load())
+        {
+            LOGW("Player manager processing already running");
+            return;
+        }
+
+        // Ensure ped factory is initialized (may have been done early)
+        auto& pedFactory = Multiplayer::CPedFactory::GetInstance();
+        if (!pedFactory.IsInitialized())
+        {
+            if (!pedFactory.Initialize(g_gtasaLib.base))
+            {
+                LOGE("Failed to initialize ped factory");
+                return;
+            }
+            LOGI("Ped factory initialized for remote player rendering");
+        }
+
+        // Initialize player manager with game base
+        auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+        if (!playerMgr.Initialize(g_gtasaLib.base))
+        {
+            LOGE("Failed to initialize player manager");
+            return;
+        }
+
+        // Start processing thread
+        g_playerManagerRunning = true;
+        g_playerManagerThread = std::thread([]() {
+            LOGI("Player manager processing thread started");
+
+            while (g_playerManagerRunning.load())
+            {
+                // Process all remote players (interpolation, etc)
+                auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+                playerMgr.Process();
+
+                // Run at ~60 FPS (16ms)
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
+
+            LOGI("Player manager processing thread stopped");
+        });
+
+        LOGI("Player manager processing started");
+    }
+
+    /**
      * Start player position sync after connection
      */
     void StartPlayerSync()
@@ -419,6 +597,9 @@ namespace MTA::Android
             LOGE("Cannot start sync: GTA:SA not loaded");
             return;
         }
+
+        // Start player manager processing (for remote players)
+        StartPlayerManagerProcessing();
 
         // Create player sync if needed
         if (!g_playerSync)
@@ -435,14 +616,29 @@ namespace MTA::Android
 
         // Set callback to send position to server
         g_playerSync->SetPositionCallback([](const Sync::PlayerSyncData& data) {
-            // For now, just log (position reading test)
-            // Later: send to server via g_serverConnection->SendPositionSync(data)
+            // Send position to server if connected
+            if (g_serverConnection && g_serverConnection->IsConnected())
+            {
+                g_serverConnection->SendPlayerSync(
+                    data.position.x, data.position.y, data.position.z,
+                    data.rotation,
+                    data.velocity.x, data.velocity.y, data.velocity.z,
+                    true  // onGround - simplified for now
+                );
+            }
+
+            // Periodic logging
             static int logCounter = 0;
             if (++logCounter >= 50)  // Log every 5 seconds
             {
-                LOGI("SYNC: pos=(%.1f, %.1f, %.1f) health=%d vehicle=%s",
+                LOGI("SYNC OUT: pos=(%.1f, %.1f, %.1f) health=%d",
                      data.position.x, data.position.y, data.position.z,
-                     data.health, data.isInVehicle ? "yes" : "no");
+                     data.health);
+
+                // Log remote player count
+                auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+                LOGI("SYNC: Remote players: %zu", playerMgr.GetPlayerCount());
+
                 logCounter = 0;
             }
         });
@@ -506,6 +702,10 @@ namespace MTA::Android
         g_initialized = true;
         LOGI("MTA:SA Android initialized successfully!");
 
+        // CRITICAL: Apply CWorld::Players patch EARLY, before game loop runs
+        // This prevents crash at 0x18f when game accesses Players[0].bCanDoDriveBy
+        EarlyInitializePedFactory();
+
         // Initialize game bypass for auto-spawn
         // This will monitor game state and spawn player when ready
         InitializeGameBypass();
@@ -529,11 +729,28 @@ namespace MTA::Android
 
         LOGI("MTA:SA Android shutting down...");
 
+        // Stop player manager processing
+        g_playerManagerRunning = false;
+        if (g_playerManagerThread.joinable())
+        {
+            g_playerManagerThread.join();
+        }
+
+        // Shutdown player manager
+        Multiplayer::CPlayerManager::GetInstance().Shutdown();
+
         // Stop player sync
         if (g_playerSync)
         {
             g_playerSync->Stop();
             g_playerSync.reset();
+        }
+
+        // Shutdown packet handler
+        if (g_packetHandler)
+        {
+            g_packetHandler->Shutdown();
+            g_packetHandler.reset();
         }
 
         // Stop connection thread

@@ -11,6 +11,13 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+
+//=============================================================================
+// Static member definition for CRefCountable
+// This creates the shared critical section used by all CRefCountable instances
+//=============================================================================
+CCriticalSection CRefCountable::ms_CS;
 
 //=============================================================================
 // Constructor / Destructor
@@ -44,6 +51,8 @@ CNetBitStreamAndroid::~CNetBitStreamAndroid()
 
 int CNetBitStreamAndroid::GetReadOffsetAsBits()
 {
+    printf("[bitstream] GetReadOffsetAsBits() -> %u\n", m_readBitOffset);
+    fflush(stdout);
     return m_readBitOffset;
 }
 
@@ -309,53 +318,107 @@ void CNetBitStreamAndroid::WriteOrthMatrix(float m00, float m01, float m02,
 
 bool CNetBitStreamAndroid::Read(unsigned char& output)
 {
-    return ReadBits((char*)&output, 8);
+    printf("[bitstream] Read(uchar&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 8);
+    printf("[bitstream]   -> value=%u (0x%02X), result=%s\n", output, output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(char& output)
 {
-    return ReadBits(&output, 8);
+    printf("[bitstream] Read(char&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits(&output, 8);
+    printf("[bitstream]   -> value=%d (0x%02X), result=%s\n", output, (unsigned char)output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(unsigned short& output)
 {
-    return ReadBits((char*)&output, 16);
+    printf("[bitstream] Read(ushort&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 16);
+    printf("[bitstream]   -> value=%u (0x%04X), result=%s\n", output, output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(short& output)
 {
-    return ReadBits((char*)&output, 16);
+    printf("[bitstream] Read(short&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 16);
+    printf("[bitstream]   -> value=%d (0x%04X), result=%s\n", output, (unsigned short)output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(unsigned int& output)
 {
-    return ReadBits((char*)&output, 32);
+    printf("[bitstream] Read(uint&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 32);
+    printf("[bitstream]   -> value=%u (0x%08X), result=%s\n", output, output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(int& output)
 {
-    return ReadBits((char*)&output, 32);
+    printf("[bitstream] Read(int&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 32);
+    printf("[bitstream]   -> value=%d (0x%08X), result=%s\n", output, (unsigned int)output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(float& output)
 {
-    return ReadBits((char*)&output, 32);
+    printf("[bitstream] Read(float&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 32);
+    printf("[bitstream]   -> value=%f, result=%s\n", output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(double& output)
 {
-    return ReadBits((char*)&output, 64);
+    printf("[bitstream] Read(double&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
+    bool result = ReadBits((char*)&output, 64);
+    printf("[bitstream]   -> value=%f, result=%s\n", output, result ? "true" : "false");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(char* output, int numberOfBytes)
 {
+    printf("[bitstream] Read(void*, %d bytes) at bit %u\n", numberOfBytes, m_readBitOffset);
+    fflush(stdout);
     if (numberOfBytes <= 0)
+    {
+        printf("[bitstream]   -> (empty read)\n");
+        fflush(stdout);
         return true;
-    return ReadBits(output, numberOfBytes * 8);
+    }
+    bool result = ReadBits(output, numberOfBytes * 8);
+    printf("[bitstream]   -> result=%s, first bytes: ", result ? "true" : "false");
+    for (int i = 0; i < std::min(numberOfBytes, 16); i++)
+        printf("%02X ", (unsigned char)output[i]);
+    printf("\n");
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::Read(ISyncStructure* syncStruct)
 {
+    printf("[bitstream] Read(ISyncStructure*) at bit %u, ptr=%p\n", m_readBitOffset, (void*)syncStruct);
+    fflush(stdout);
     // SyncStructure reads itself
     return syncStruct != nullptr;
 }
@@ -366,71 +429,102 @@ bool CNetBitStreamAndroid::Read(ISyncStructure* syncStruct)
 
 bool CNetBitStreamAndroid::ReadCompressed(unsigned char& output)
 {
+    printf("[bitstream] ReadCompressed(uchar&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     if (ReadBit())
     {
-        return Read(output);
+        bool result = Read(output);
+        printf("[bitstream]   -> (non-zero) value=%u, result=%s\n", output, result ? "true" : "false");
+        fflush(stdout);
+        return result;
     }
     else
     {
         output = 0;
+        printf("[bitstream]   -> (zero) value=0\n");
+        fflush(stdout);
         return true;
     }
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(char& output)
 {
+    printf("[bitstream] ReadCompressed(char&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     return ReadCompressed((unsigned char&)output);
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(unsigned short& output)
 {
+    printf("[bitstream] ReadCompressed(ushort&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     if (ReadBit())
     {
         unsigned char low;
         if (!Read(low))
             return false;
         output = low;
+        printf("[bitstream]   -> (compressed) value=%u\n", output);
+        fflush(stdout);
         return true;
     }
     else
     {
-        return Read(output);
+        bool result = Read(output);
+        printf("[bitstream]   -> (full) value=%u, result=%s\n", output, result ? "true" : "false");
+        fflush(stdout);
+        return result;
     }
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(short& output)
 {
+    printf("[bitstream] ReadCompressed(short&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     return ReadCompressed((unsigned short&)output);
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(unsigned int& output)
 {
+    printf("[bitstream] ReadCompressed(uint&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     if (ReadBit())
     {
         unsigned short low;
         if (!ReadCompressed(low))
             return false;
         output = low;
+        printf("[bitstream]   -> (compressed) value=%u\n", output);
+        fflush(stdout);
         return true;
     }
     else
     {
-        return Read(output);
+        bool result = Read(output);
+        printf("[bitstream]   -> (full) value=%u, result=%s\n", output, result ? "true" : "false");
+        fflush(stdout);
+        return result;
     }
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(int& output)
 {
+    printf("[bitstream] ReadCompressed(int&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     return ReadCompressed((unsigned int&)output);
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(float& output)
 {
+    printf("[bitstream] ReadCompressed(float&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     return Read(output);
 }
 
 bool CNetBitStreamAndroid::ReadCompressed(double& output)
 {
+    printf("[bitstream] ReadCompressed(double&) at bit %u\n", m_readBitOffset);
+    fflush(stdout);
     return Read(output);
 }
 
@@ -440,11 +534,23 @@ bool CNetBitStreamAndroid::ReadCompressed(double& output)
 
 bool CNetBitStreamAndroid::ReadBits(char* output, unsigned int numbits)
 {
+    printf("[bitstream] ReadBits(%u bits) at bit %u (total=%u)\n", numbits, m_readBitOffset, m_writeBitOffset);
+    fflush(stdout);
+
     if (numbits == 0)
+    {
+        printf("[bitstream]   -> (zero bits requested)\n");
+        fflush(stdout);
         return true;
+    }
 
     if (m_readBitOffset + numbits > m_writeBitOffset)
+    {
+        printf("[bitstream]   -> FAILED: not enough bits (need %u, have %u)\n",
+               numbits, m_writeBitOffset - m_readBitOffset);
+        fflush(stdout);
         return false;
+    }
 
     // Fast path: byte-aligned read
     if ((m_readBitOffset % 8) == 0)
@@ -479,20 +585,29 @@ bool CNetBitStreamAndroid::ReadBits(char* output, unsigned int numbits)
         }
     }
 
+    printf("[bitstream]   -> OK, new offset=%u\n", m_readBitOffset);
+    fflush(stdout);
     return true;
 }
 
 bool CNetBitStreamAndroid::ReadBit()
 {
     if (m_readBitOffset >= m_writeBitOffset)
+    {
+        printf("[bitstream] ReadBit() at bit %u -> FAILED (past end)\n", m_readBitOffset);
+        fflush(stdout);
         return false;
+    }
 
     unsigned int byteOffset = m_readBitOffset / 8;
     unsigned int bitOffset = m_readBitOffset % 8;
 
     m_readBitOffset++;
 
-    return (m_data[byteOffset] >> bitOffset) & 1;
+    bool result = (m_data[byteOffset] >> bitOffset) & 1;
+    printf("[bitstream] ReadBit() at bit %u -> %d\n", m_readBitOffset - 1, result ? 1 : 0);
+    fflush(stdout);
+    return result;
 }
 
 bool CNetBitStreamAndroid::ReadNormVector(float& x, float& y, float& z)
@@ -525,6 +640,8 @@ bool CNetBitStreamAndroid::ReadOrthMatrix(float& m00, float& m01, float& m02,
 
 int CNetBitStreamAndroid::GetNumberOfBitsUsed() const
 {
+    printf("[bitstream] GetNumberOfBitsUsed() -> %u\n", m_writeBitOffset);
+    fflush(stdout);
     return m_writeBitOffset;
 }
 
@@ -571,5 +688,7 @@ unsigned char* CNetBitStreamAndroid::GetData() const
 
 unsigned short CNetBitStreamAndroid::Version() const
 {
+    printf("[bitstream] Version() -> 0x%04X (%u)\n", m_version, m_version);
+    fflush(stdout);
     return m_version;
 }

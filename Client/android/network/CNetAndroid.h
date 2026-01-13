@@ -446,6 +446,23 @@ public:
     void RegisterPacketHandler(PacketHandler handler);
 
     /**
+     * Check if packet handler is registered
+     */
+    bool HasPacketHandler() const { return m_packetHandler != nullptr; }
+
+    /**
+     * Dispatch a packet to the registered handler
+     */
+    bool DispatchPacket(PacketID packetId, NetBitStream& bitStream)
+    {
+        if (m_packetHandler)
+        {
+            return m_packetHandler(packetId, bitStream);
+        }
+        return false;
+    }
+
+    /**
      * Process network updates (call every frame)
      */
     void DoPulse();

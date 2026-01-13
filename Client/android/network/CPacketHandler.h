@@ -11,6 +11,7 @@
 #define CPACKET_HANDLER_ANDROID_H
 
 #include "CNetAndroid.h"
+#include "../multiplayer/CPlayerManager.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -21,7 +22,6 @@ namespace MTA::Android::Network
 
 // Forward declarations
 class CClientGame;
-class CPlayerManager;
 class CVehicleManager;
 
 //=============================================================================

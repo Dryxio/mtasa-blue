@@ -278,48 +278,211 @@ inline PlayerSyncData CPlayerSync::GetSyncData() const
 
 inline uintptr_t CPlayerSync::GetLocalPlayerPed() const
 {
+    // Rate-limit logging to avoid spam (log every 50 calls)
+    static int debugCounter = 0;
+    bool shouldLog = (debugCounter++ % 50 == 0);
+
     if (m_gameBase == 0)
+    {
+        if (shouldLog) SYNC_LOGE("GetLocalPlayerPed: FAIL - m_gameBase is 0!");
         return 0;
+    }
 
-    // Get player array and focus index
-    #if defined(__aarch64__)
-        uintptr_t* playersPtr = reinterpret_cast<uintptr_t*>(m_gameBase + ARM::ARM64::g_WorldPlayersPtr);
-        int playerIndex = *reinterpret_cast<int*>(m_gameBase + ARM::ARM64::g_PlayerInFocus);
-    #else
-        uintptr_t* playersPtr = reinterpret_cast<uintptr_t*>(m_gameBase + ARM::ARM32::g_WorldPlayersPtr);
-        int playerIndex = *reinterpret_cast<int*>(m_gameBase + ARM::ARM32::g_PlayerInFocus);
-    #endif
+    if (shouldLog) SYNC_LOGI("GetLocalPlayerPed: m_gameBase=0x%lx", (unsigned long)m_gameBase);
 
-    if (!playersPtr || playerIndex < 0 || playerIndex > 1)
+#if defined(__aarch64__)
+    //=========================================================================
+    // ARM64: Debug both approaches to find where detection fails
+    //=========================================================================
+
+    // --- Approach 1: FindPlayerPed function call (what CGameBypass uses) ---
+    if (shouldLog) {
+        SYNC_LOGI("GetLocalPlayerPed: [ARM64] Trying FindPlayerPed function...");
+        SYNC_LOGI("  FindPlayerPed offset=0x%x, absolute addr=0x%lx",
+                 MTA::Android::ARM::ARM64::FindPlayerPed,
+                 (unsigned long)(m_gameBase + MTA::Android::ARM::ARM64::FindPlayerPed));
+    }
+
+    typedef void* (*FindPlayerPed_t)(int);
+    auto FindPlayerPedFunc = reinterpret_cast<FindPlayerPed_t>(m_gameBase + MTA::Android::ARM::ARM64::FindPlayerPed);
+    void* pPed = FindPlayerPedFunc(0);
+
+    if (shouldLog) {
+        if (pPed) {
+            SYNC_LOGI("GetLocalPlayerPed: [ARM64] FindPlayerPed(0) SUCCESS = 0x%lx", (unsigned long)pPed);
+        } else {
+            SYNC_LOGE("GetLocalPlayerPed: [ARM64] FindPlayerPed(0) returned NULL!");
+        }
+    }
+
+    // --- Approach 2: Offset-based (for comparison/debugging) ---
+    if (shouldLog) {
+        SYNC_LOGI("GetLocalPlayerPed: [ARM64] Also checking offset-based approach for comparison...");
+
+        uintptr_t playersArrayAddr = m_gameBase + MTA::Android::ARM::ARM64::g_WorldPlayersPtr;
+        uintptr_t playerFocusAddr = m_gameBase + MTA::Android::ARM::ARM64::g_PlayerInFocus;
+
+        SYNC_LOGI("  g_WorldPlayersPtr: offset=0x%x, addr=0x%lx",
+                 MTA::Android::ARM::ARM64::g_WorldPlayersPtr, (unsigned long)playersArrayAddr);
+        SYNC_LOGI("  g_PlayerInFocus: offset=0x%x, addr=0x%lx",
+                 MTA::Android::ARM::ARM64::g_PlayerInFocus, (unsigned long)playerFocusAddr);
+
+        // Try to read values (may crash if wrong offsets - be careful)
+        uintptr_t* playersPtr = reinterpret_cast<uintptr_t*>(playersArrayAddr);
+        int playerIndex = *reinterpret_cast<int*>(playerFocusAddr);
+
+        SYNC_LOGI("  playerIndex (from offset) = %d", playerIndex);
+
+        if (playersPtr && playerIndex >= 0 && playerIndex <= 1) {
+            uintptr_t offsetBasedPed = playersPtr[playerIndex];
+            SYNC_LOGI("  playersPtr[%d] (from offset) = 0x%lx", playerIndex, (unsigned long)offsetBasedPed);
+
+            // Compare the two approaches
+            if (offsetBasedPed != reinterpret_cast<uintptr_t>(pPed)) {
+                SYNC_LOGE("  MISMATCH! FindPlayerPed=0x%lx vs Offset=0x%lx",
+                         (unsigned long)pPed, (unsigned long)offsetBasedPed);
+            } else {
+                SYNC_LOGI("  MATCH: Both approaches return same ped address");
+            }
+        } else {
+            SYNC_LOGE("  Offset-based approach FAILED: playersPtr=%p, playerIndex=%d",
+                     (void*)playersPtr, playerIndex);
+        }
+    }
+
+    // Use FindPlayerPed result (the working approach)
+    if (pPed) {
+        return reinterpret_cast<uintptr_t>(pPed);
+    }
+
+    if (shouldLog) SYNC_LOGE("GetLocalPlayerPed: [ARM64] FINAL RESULT = NULL (player not found!)");
+    return 0;
+
+#else
+    //=========================================================================
+    // ARM32: Use offset-based approach
+    //=========================================================================
+
+    if (shouldLog) {
+        SYNC_LOGI("GetLocalPlayerPed: [ARM32] Using offset-based approach...");
+        SYNC_LOGI("  g_WorldPlayersPtr: offset=0x%x, addr=0x%lx",
+                 MTA::Android::ARM::ARM32::g_WorldPlayersPtr,
+                 (unsigned long)(m_gameBase + MTA::Android::ARM::ARM32::g_WorldPlayersPtr));
+        SYNC_LOGI("  g_PlayerInFocus: offset=0x%x, addr=0x%lx",
+                 MTA::Android::ARM::ARM32::g_PlayerInFocus,
+                 (unsigned long)(m_gameBase + MTA::Android::ARM::ARM32::g_PlayerInFocus));
+    }
+
+    uintptr_t* playersPtr = reinterpret_cast<uintptr_t*>(m_gameBase + MTA::Android::ARM::ARM32::g_WorldPlayersPtr);
+    int playerIndex = *reinterpret_cast<int*>(m_gameBase + MTA::Android::ARM::ARM32::g_PlayerInFocus);
+
+    if (shouldLog) {
+        SYNC_LOGI("  playersPtr=0x%lx, playerIndex=%d", (unsigned long)playersPtr, playerIndex);
+    }
+
+    if (!playersPtr) {
+        if (shouldLog) SYNC_LOGE("GetLocalPlayerPed: [ARM32] FAIL - playersPtr is NULL!");
         return 0;
+    }
 
-    return playersPtr[playerIndex];
+    if (playerIndex < 0 || playerIndex > 1) {
+        if (shouldLog) SYNC_LOGE("GetLocalPlayerPed: [ARM32] FAIL - playerIndex=%d out of range!", playerIndex);
+        return 0;
+    }
+
+    uintptr_t pedPtr = playersPtr[playerIndex];
+
+    if (shouldLog) {
+        if (pedPtr) {
+            SYNC_LOGI("GetLocalPlayerPed: [ARM32] SUCCESS - playersPtr[%d]=0x%lx", playerIndex, (unsigned long)pedPtr);
+        } else {
+            SYNC_LOGE("GetLocalPlayerPed: [ARM32] FAIL - playersPtr[%d] is NULL!", playerIndex);
+        }
+    }
+
+    return pedPtr;
+#endif
 }
 
 inline bool CPlayerSync::IsPlayerInGame() const
 {
+    // Rate-limit logging (log every 50 calls)
+    static int debugCounter = 0;
+    bool shouldLog = (debugCounter++ % 50 == 0);
+
     uintptr_t ped = GetLocalPlayerPed();
     if (ped == 0)
+    {
+        if (shouldLog) SYNC_LOGE("IsPlayerInGame: NO - GetLocalPlayerPed() returned 0");
         return false;
+    }
 
     // Check if ped has a valid matrix (means it's spawned in world)
     RwMatrix* matrix = GetPlayerMatrix(ped);
-    return (matrix != nullptr);
+
+    if (matrix == nullptr)
+    {
+        if (shouldLog) SYNC_LOGE("IsPlayerInGame: NO - ped=0x%lx but GetPlayerMatrix() returned NULL", (unsigned long)ped);
+        return false;
+    }
+
+    if (shouldLog) {
+        SYNC_LOGI("IsPlayerInGame: YES - ped=0x%lx, matrix=0x%lx, pos=(%.2f, %.2f, %.2f)",
+                 (unsigned long)ped, (unsigned long)matrix,
+                 matrix->pos.x, matrix->pos.y, matrix->pos.z);
+    }
+
+    return true;
 }
 
 inline RwMatrix* CPlayerSync::GetPlayerMatrix(uintptr_t pedPtr) const
 {
+    // Rate-limit logging (log every 50 calls)
+    static int debugCounter = 0;
+    bool shouldLog = (debugCounter++ % 50 == 0);
+
     if (pedPtr == 0)
+    {
+        if (shouldLog) SYNC_LOGE("GetPlayerMatrix: FAIL - pedPtr is 0");
         return nullptr;
+    }
 
     #if defined(__aarch64__)
+        if (shouldLog) {
+            SYNC_LOGI("GetPlayerMatrix: [ARM64] pedPtr=0x%lx, MATRIX_PTR offset=0x%x",
+                     (unsigned long)pedPtr, PedOffsets::ARM64_MATRIX_PTR);
+        }
         uintptr_t matrixPtr = *reinterpret_cast<uintptr_t*>(pedPtr + PedOffsets::ARM64_MATRIX_PTR);
     #else
+        if (shouldLog) {
+            SYNC_LOGI("GetPlayerMatrix: [ARM32] pedPtr=0x%lx, MATRIX_PTR offset=0x%x",
+                     (unsigned long)pedPtr, PedOffsets::MATRIX_PTR);
+        }
         uintptr_t matrixPtr = *reinterpret_cast<uintptr_t*>(pedPtr + PedOffsets::MATRIX_PTR);
     #endif
 
+    if (shouldLog) {
+        SYNC_LOGI("GetPlayerMatrix: matrixPtr value = 0x%lx", (unsigned long)matrixPtr);
+    }
+
     if (matrixPtr == 0)
+    {
+        if (shouldLog) SYNC_LOGE("GetPlayerMatrix: FAIL - matrix pointer at ped+0x%x is NULL",
+                                #if defined(__aarch64__)
+                                    PedOffsets::ARM64_MATRIX_PTR
+                                #else
+                                    PedOffsets::MATRIX_PTR
+                                #endif
+                                );
         return nullptr;
+    }
+
+    if (shouldLog) {
+        // Validate the matrix looks reasonable
+        RwMatrix* matrix = reinterpret_cast<RwMatrix*>(matrixPtr);
+        SYNC_LOGI("GetPlayerMatrix: SUCCESS - matrix at 0x%lx, pos=(%.2f, %.2f, %.2f)",
+                 (unsigned long)matrixPtr, matrix->pos.x, matrix->pos.y, matrix->pos.z);
+    }
 
     return reinterpret_cast<RwMatrix*>(matrixPtr);
 }
@@ -357,7 +520,14 @@ inline bool CPlayerSync::ReadPlayerData(PlayerSyncData& data)
         data.velocity = *vel;
 
     if (health)
-        data.health = static_cast<uint8_t>(*health);
+    {
+        float healthVal = *health;
+        // WORKAROUND: Health reading returns 0 incorrectly on ARM64
+        // Force minimum health of 100 until we debug the correct offset
+        if (healthVal <= 0.0f)
+            healthVal = 100.0f;
+        data.health = static_cast<uint8_t>(healthVal);
+    }
 
     if (armor)
         data.armor = static_cast<uint8_t>(*armor);

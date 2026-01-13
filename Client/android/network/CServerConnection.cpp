@@ -17,6 +17,7 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <vector>
 
 #define LOG_TAG "MTA-Connection"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -735,7 +736,51 @@ void CServerConnection::ProcessWaitJoinedGame()
 
 void CServerConnection::ProcessConnected()
 {
-    // Process incoming packets when connected
+    // Receive packets directly from our connected socket (not through CNetAndroid)
+    struct pollfd pfd;
+    pfd.fd = m_socket;
+    pfd.events = POLLIN;
+
+    // Check for incoming packets (non-blocking)
+    int result = poll(&pfd, 1, 10);  // 10ms timeout
+    if (result > 0 && (pfd.revents & POLLIN))
+    {
+        uint8_t buffer[2048];
+        sockaddr_in fromAddr;
+        socklen_t fromLen = sizeof(fromAddr);
+
+        ssize_t received = recvfrom(m_socket, buffer, sizeof(buffer), 0,
+                                    reinterpret_cast<sockaddr*>(&fromAddr), &fromLen);
+
+        if (received > 0)
+        {
+            m_lastPacketTime = GetCurrentTimeMs();
+            uint8_t packetId = buffer[0];
+
+            // Debug log for sync packets
+            static int incomingCount = 0;
+            if (packetId == 0x20)  // PLAYER_PURESYNC
+            {
+                if (++incomingCount % 100 == 1)
+                {
+                    LOGD("Received PURESYNC from server (%zd bytes)", received);
+                }
+            }
+            else
+            {
+                LOGD("Received packet 0x%02X from server (%zd bytes)", packetId, received);
+            }
+
+            // Dispatch to packet handler if registered
+            if (m_network && m_network->HasPacketHandler())
+            {
+                NetBitStream bitStream(buffer + 1, received - 1);
+                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+            }
+        }
+    }
+
+    // Also do network pulse for stats etc (but not for packet receiving)
     if (m_network)
     {
         m_network->DoPulse();
@@ -828,8 +873,10 @@ void CServerConnection::SendJoinDataPacket()
     // Bitstream version
     bitStream.Write(MTA_DM_BITSTREAM_VERSION);
 
-    // Player version string
-    std::string versionString = "1.6.0-android.0.0";
+    // Player version string (format: major.minor.patch-type.build.revision)
+    // Real MTA clients use format like "1.6.0-9.23324.0"
+    // Type 9 = release builds, build number must be reasonable
+    std::string versionString = "1.6.0-9.21000.0";
     bitStream.Write(versionString);
 
     // Update required flag (1 bit)
@@ -871,6 +918,34 @@ void CServerConnection::SendJoinDataPacket()
     packet[0] = PACKET_ID_PLAYER_JOINDATA;
     size_t dataSize = bitStream.GetBytesUsed();
     std::memcpy(packet + 1, bitStream.GetData(), dataSize);
+
+    // Debug: Hex dump of JOINDATA packet
+    LOGI("=== JOINDATA PACKET HEX DUMP ===");
+    LOGI("Total size: %zu bytes (including packet ID)", dataSize + 1);
+
+    // Dump in rows of 16 bytes
+    const uint8_t* data = bitStream.GetData();
+    char hexLine[128];
+    char asciiLine[32];
+    for (size_t i = 0; i < dataSize; i += 16) {
+        int hexPos = 0;
+        int asciiPos = 0;
+        for (size_t j = 0; j < 16 && i + j < dataSize; j++) {
+            hexPos += sprintf(hexLine + hexPos, "%02x ", data[i + j]);
+            asciiLine[asciiPos++] = (data[i + j] >= 32 && data[i + j] < 127) ? data[i + j] : '.';
+        }
+        asciiLine[asciiPos] = '\0';
+        LOGI("  %04zx: %-48s %s", i, hexLine, asciiLine);
+    }
+
+    // Also log the parsed fields for verification
+    LOGI("=== PARSED FIELDS ===");
+    LOGI("  Netcode version: 0x%04x", MTA_DM_NETCODE_VERSION);
+    LOGI("  MTA version: 0x%04x", MTA_DM_VERSION);
+    LOGI("  Bitstream version: 0x%04x", MTA_DM_BITSTREAM_VERSION);
+    LOGI("  Version string: %s", versionString.c_str());
+    LOGI("  Game version: %d", m_playerInfo.gameVersion);
+    LOGI("  Nickname: %s", m_playerInfo.nickname.c_str());
 
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
@@ -1061,6 +1136,112 @@ std::string CServerConnection::GetConnectionTestResults() const
     ss << "  \"last_error\": \"" << m_testResults.lastError << "\"\n";
     ss << "}";
     return ss.str();
+}
+
+//=============================================================================
+// Player Sync
+//=============================================================================
+
+void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation,
+                                         float vx, float vy, float vz, bool onGround)
+{
+    if (m_state != ServerConnectionState::CONNECTED)
+    {
+        return;  // Not connected
+    }
+
+    if (!m_network)
+    {
+        return;  // No network layer
+    }
+
+    // Rate limiting is handled by the caller
+    auto bitStream = m_network->AllocateBitStream();
+    if (!bitStream)
+    {
+        return;
+    }
+
+    // Time context (for ordering/lag compensation)
+    uint16_t timeContext = static_cast<uint16_t>(GetCurrentTimeMs() & 0xFFFF);
+    bitStream->Write(timeContext);
+
+    // Player puresync flags (15 bits)
+    // Bit 0: isInWater, Bit 1: isOnGround, Bit 2: hasJetPack, etc.
+    uint16_t flags = 0;
+    if (onGround) flags |= 0x0002;  // isOnGround
+
+    // Check if we have velocity
+    bool hasVelocity = (vx != 0.0f || vy != 0.0f || vz != 0.0f);
+    if (hasVelocity) flags |= 0x0400;  // syncingVelocity
+
+    bitStream->WriteBits(reinterpret_cast<uint8_t*>(&flags), 15);
+
+    // Position (3 floats)
+    bitStream->Write(x);
+    bitStream->Write(y);
+    bitStream->Write(z);
+
+    // Rotation (16-bit compressed from -PI to PI)
+    float normalizedRot = (rotation + 3.141593f) / 6.283185f;  // 0 to 1
+    uint16_t rotCompressed = static_cast<uint16_t>(normalizedRot * 65535.0f);
+    bitStream->Write(rotCompressed);
+
+    // Velocity (if syncing)
+    if (hasVelocity)
+    {
+        bitStream->WriteBit(true);  // Has non-zero velocity
+        bitStream->Write(vx);
+        bitStream->Write(vy);
+        bitStream->Write(vz);
+    }
+
+    // Health (8-bit, 0-200 range)
+    bitStream->Write(static_cast<uint8_t>(100));  // Full health for now
+
+    // Armor (8-bit)
+    bitStream->Write(static_cast<uint8_t>(0));
+
+    // Camera rotation (12-bit compressed) - same as player rotation for now
+    uint16_t camRot = rotCompressed >> 4;  // Use top 12 bits
+    bitStream->WriteBits(reinterpret_cast<uint8_t*>(&camRot), 12);
+
+    // Send packet directly via our socket (not through CNetAndroid which has a separate socket)
+    if (m_socket >= 0)
+    {
+        // Build packet: packet ID + bitstream data
+        std::vector<uint8_t> packetData;
+        packetData.push_back(static_cast<uint8_t>(PacketID::PLAYER_PURESYNC));
+        packetData.insert(packetData.end(), bitStream->GetData(),
+                          bitStream->GetData() + bitStream->GetBytesUsed());
+
+        // Create server address
+        sockaddr_in serverAddr;
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(m_serverInfo.port);
+        inet_pton(AF_INET, m_resolvedIP.c_str(), &serverAddr.sin_addr);
+
+        // Send directly
+        ssize_t sent = sendto(m_socket, packetData.data(), packetData.size(), 0,
+                              reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr));
+
+        // Debug logging (every 100th packet or on error)
+        static int syncCount = 0;
+        static int errorCount = 0;
+        if (sent < 0)
+        {
+            if (++errorCount <= 5)  // Only log first 5 errors
+            {
+                LOGE("PURESYNC send error: %s", strerror(errno));
+            }
+        }
+        else if (++syncCount >= 100)
+        {
+            LOGD("Sent PURESYNC: pos=(%.1f,%.1f,%.1f) rot=%.2f (%zd bytes)",
+                 x, y, z, rotation, sent);
+            syncCount = 0;
+        }
+    }
 }
 
 } // namespace MTA::Android::Network
