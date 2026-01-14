@@ -258,6 +258,20 @@ public:
     unsigned short GetPort() const { return m_usPort; }
 };
 
+struct SScriptInfo
+{
+    const char* szMinServerHostVer;
+    const char* szMinServerRunVer;
+    const char* szMinClientRunVer;
+};
+
+struct SPlayerPacketUsage
+{
+    NetServerPlayerID playerId;
+    unsigned int      uiPktsPerSec;
+    unsigned int      uiBytesPerSec;
+};
+
 enum NetServerPacketPriority
 {
     PACKET_PRIORITY_HIGH = 0,
@@ -424,6 +438,16 @@ namespace WirePacketID
     static const uint8_t PLAYER_JOINDATA = 0x01;     // Client -> Server (raw packet)
 }
 
+// Sync packet IDs used for bypass/broadcast handling
+namespace SyncPacketID
+{
+    static const uint8_t PLAYER_LIST = 25;
+    static const uint8_t PLAYER_KEYSYNC = 31;
+    static const uint8_t PLAYER_PURESYNC = 32;
+    static const uint8_t PLAYER_VEHICLE_PURESYNC = 33;
+    static const uint8_t LIGHTSYNC = 34;
+}
+
 //=============================================================================
 // Client Connection State
 //=============================================================================
@@ -448,6 +472,7 @@ struct ClientConnection
     uint64_t            lastPacketTime = 0;
     uint16_t            bitstreamVersion = 0x06B;  // Latest MTA version
     std::string         playerName;
+    uint32_t            elementId = 0xFFFFFFFFu;
 
     // Statistics
     uint64_t            packetsReceived = 0;
@@ -531,9 +556,10 @@ public:
     // Methods with default implementations in original header (still in vtable!)
     virtual bool EncryptDumpfile(const char* szClearPathFilename, const char* szEncryptedPathFilename) { return false; }
     virtual bool ValidateHttpCacheFileName(const char* szFilename) { return false; }
-    virtual bool GetScriptInfo(const char* cpInBuffer, uint uiInSize, void* pOutInfo) { return false; }
+    virtual bool GetScriptInfo(const char* cpInBuffer, unsigned int uiInSize, SScriptInfo* pOutInfo) { return false; }
     virtual bool DeobfuscateScript(const char* cpInBuffer, uint uiInSize, const char** pcpOutBuffer, uint* puiOutSize, const char* szScriptName) { return false; }
-    virtual bool GetPlayerPacketUsageStats(unsigned char* packetIdList, uint uiNumPacketIds, void* pOutStats, uint uiTopCount) { return false; }
+    virtual bool GetPlayerPacketUsageStats(unsigned char* packetIdList, unsigned int uiNumPacketIds,
+                                           SPlayerPacketUsage* pOutStats, unsigned int uiTopCount) { return false; }
     virtual const char* GetLogOutput() { return nullptr; }
     virtual bool IsValidSocket(const NetServerPlayerID& playerID) { return false; }
 };
@@ -615,6 +641,9 @@ private:
     void HandlePlayerJoinData(const uint8_t* data, int length,
                               ClientConnection& client);
     void SendJoinComplete(ClientConnection& client);
+    void SendPlayerSpawn(ClientConnection& client);
+    void NotifyPlayerJoined(ClientConnection& newPlayer);
+    void SendExistingPlayersTo(ClientConnection& newPlayer);
     ClientConnection* GetClient(const NetServerPlayerID& playerID);
     ClientConnection* GetOrCreateClient(const struct sockaddr_in& addr);
     void RemoveClient(const NetServerPlayerID& playerID);

@@ -774,6 +774,11 @@ inline void CPlayerManager::RemoveStalePlayers()
 
 inline void CPlayerManager::OnGameStateChange(int newState)
 {
+    if (newState == m_gameState)
+    {
+        return;
+    }
+
     m_gameState = newState;
     PMGR_LOGD("Game state changed to %d", newState);
 

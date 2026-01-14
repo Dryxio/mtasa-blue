@@ -518,7 +518,6 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
 
         case RakNetPacketID::DISCONNECTION_NOTIFICATION:
         case RakNetPacketID::CONNECTION_LOST:
-        case 0x20:  // Another disconnect notification variant
         {
             NET_LOG("Client disconnected (packet 0x%02X): %s:%d",
                     packetID, inet_ntoa(fromAddr.sin_addr), ntohs(fromAddr.sin_port));
@@ -545,6 +544,64 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
 
             NET_LOG("   Client disconnect handled successfully");
             return;  // Exit early since lock is released
+        }
+
+        // BYPASS: Sync packets - broadcast to other clients directly
+        case SyncPacketID::PLAYER_PURESYNC:
+        case SyncPacketID::PLAYER_VEHICLE_PURESYNC:
+        case SyncPacketID::PLAYER_KEYSYNC:
+        case SyncPacketID::LIGHTSYNC:
+        {
+            NET_LOG("   -> SYNC BYPASS: Broadcasting packet 0x%02X to other clients", packetID);
+            NetServerPlayerID senderID = client->playerID;
+            constexpr unsigned int kElementIdBits = 17;
+            const uint32_t elementId = client->elementId;
+
+            if (elementId == 0xFFFFFFFFu)
+            {
+                NET_LOG("   -> SYNC BYPASS: missing elementId for sender, queueing to main thread");
+                NetServerPlayerID copyPlayerID = client->playerID;
+                uint16_t copyBitstreamVersion = client->bitstreamVersion;
+                lock.unlock();
+                QueuePacketForMainThread(packetID, copyPlayerID,
+                                          data + 1, length - 1, copyBitstreamVersion);
+                return;
+            }
+
+            CNetBitStreamAndroid relayed;
+            const uint32_t maxValue = (1u << kElementIdBits) - 1u;
+            const uint32_t elementValue = (elementId == 0xFFFFFFFFu) ? maxValue : elementId;
+            relayed.WriteBits(reinterpret_cast<const char*>(&elementValue), kElementIdBits);
+
+            if (length > 1)
+            {
+                const unsigned int payloadBits = static_cast<unsigned int>((length - 1) * 8);
+                relayed.WriteBits(reinterpret_cast<const char*>(data + 1), payloadBits);
+            }
+
+            const int relayedBytes = relayed.GetNumberOfBytesUsed();
+            std::vector<uint8_t> packet(1 + relayedBytes);
+            packet[0] = packetID;
+            if (relayedBytes > 0)
+            {
+                memcpy(packet.data() + 1, relayed.GetData(), relayedBytes);
+            }
+
+            for (auto& pair : m_clients)
+            {
+                if (pair.second.state == ClientState::CONNECTED &&
+                    !(pair.second.playerID == senderID))
+                {
+                    sockaddr_in destAddr;
+                    destAddr.sin_family = AF_INET;
+                    destAddr.sin_addr.s_addr = htonl(pair.second.playerID.GetBinaryAddress());
+                    destAddr.sin_port = htons(pair.second.playerID.GetPort());
+
+                    SendRawPacket(packet.data(), packet.size(), destAddr);
+                    NET_LOG("      -> Sent to client %lu", pair.second.playerID.GetBinaryAddress());
+                }
+            }
+            return;
         }
 
         default:
@@ -1069,6 +1126,30 @@ bool CNetServerAndroid::SendPacket(unsigned char ucPacketID,
             break;
     }
 
+    if (ucPacketID == MTAPacketID::SERVER_JOINEDGAME)
+    {
+        constexpr unsigned int kElementIdBits = 17;
+        const int dataSize = bitStream->GetNumberOfBytesUsed();
+        if (dataSize > 0 && (dataSize * 8) >= static_cast<int>(kElementIdBits))
+        {
+            CNetBitStreamAndroid probe(bitStream->GetData(), static_cast<unsigned int>(dataSize));
+            uint32_t rawId = 0;
+            if (probe.ReadBits(reinterpret_cast<char*>(&rawId), kElementIdBits))
+            {
+                const uint32_t maxValue = (1u << kElementIdBits) - 1u;
+                uint32_t elementId = (rawId == maxValue) ? 0xFFFFFFFFu : rawId;
+                if (auto* client = GetClient(playerID))
+                {
+                    client->elementId = elementId;
+                    NET_LOG("SendPacket: cached elementId %u for %lu:%u",
+                            elementId,
+                            playerID.GetBinaryAddress(),
+                            playerID.GetPort());
+                }
+            }
+        }
+    }
+
     // Build packet: ID + data
     int dataSize = bitStream->GetNumberOfBytesUsed();
     std::vector<uint8_t> packet(1 + dataSize);
@@ -1451,7 +1532,56 @@ uint64_t CNetServerAndroid::GetTimeMs()
 void CNetServerAndroid::LogPacket(const char* direction, const uint8_t* data,
                                    int length, const sockaddr_in& addr)
 {
-    // Build hex string (first 32 bytes max)
+    auto shouldDumpFull = [](const uint8_t* payload, int payloadLength) {
+        static int s_dump = -1;
+        if (s_dump == -1)
+        {
+            const char* env = getenv("MTA_ANDROID_DUMP_PACKETS");
+            s_dump = (env && *env && *env != '0') ? 1 : 0;
+        }
+
+        if (!s_dump || !payload || payloadLength <= 0)
+            return false;
+
+        const uint8_t id = payload[0];
+        switch (id)
+        {
+            case SyncPacketID::PLAYER_LIST:
+            case 26:  // PLAYER_SPAWN
+            case SyncPacketID::PLAYER_KEYSYNC:
+            case SyncPacketID::PLAYER_PURESYNC:
+            case SyncPacketID::PLAYER_VEHICLE_PURESYNC:
+            case SyncPacketID::LIGHTSYNC:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    if (shouldDumpFull(data, length))
+    {
+        NET_LOG("%s [%s:%d] %d bytes:",
+                direction,
+                inet_ntoa(addr.sin_addr),
+                ntohs(addr.sin_port),
+                length);
+
+        for (int offset = 0; offset < length; offset += 16)
+        {
+            char hexLine[64];
+            int hexLen = 0;
+            int maxBytes = std::min(16, length - offset);
+            for (int i = 0; i < maxBytes && hexLen < (int)sizeof(hexLine) - 3; i++)
+            {
+                hexLen += snprintf(hexLine + hexLen, sizeof(hexLine) - hexLen,
+                                   "%02x ", data[offset + i]);
+            }
+            NET_LOG("  %04x: %s", offset, hexLine);
+        }
+        return;
+    }
+
+    // Default: print first 32 bytes only
     char hexStr[128];
     int hexLen = 0;
     int maxBytes = std::min(length, 32);

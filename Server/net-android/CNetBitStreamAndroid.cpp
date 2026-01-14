@@ -142,10 +142,7 @@ void CNetBitStreamAndroid::Write(const ISyncStructure* syncStruct)
 {
     // SyncStructure writes itself
     if (syncStruct)
-    {
-        // Cast away const and call Write
-        // ISyncStructure should handle this properly
-    }
+        syncStruct->Write(*this);
 }
 
 //=============================================================================
@@ -419,8 +416,9 @@ bool CNetBitStreamAndroid::Read(ISyncStructure* syncStruct)
 {
     printf("[bitstream] Read(ISyncStructure*) at bit %u, ptr=%p\n", m_readBitOffset, (void*)syncStruct);
     fflush(stdout);
-    // SyncStructure reads itself
-    return syncStruct != nullptr;
+    if (!syncStruct)
+        return false;
+    return syncStruct->Read(*this);
 }
 
 //=============================================================================

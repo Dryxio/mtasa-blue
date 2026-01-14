@@ -294,6 +294,7 @@ public:
      * Send RPC call
      */
     void SendRPC(RPCFunction function, NetBitStream& data);
+    void SendCoreRPC(uint8_t functionId);
 
 private:
     //=========================================================================

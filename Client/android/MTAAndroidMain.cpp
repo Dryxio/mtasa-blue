@@ -59,6 +59,7 @@ namespace MTA::Android
     static std::unique_ptr<Network::CServerConnection> g_serverConnection;
     static std::thread g_connectionThread;
     static std::atomic<bool> g_connectionRunning{false};
+    static std::atomic<bool> g_sentIngameNotice{false};
 
     // Player sync
     static std::unique_ptr<Sync::CPlayerSync> g_playerSync;
@@ -269,31 +270,39 @@ namespace MTA::Android
             Hooks::g_pageSize = sysconf(_SC_PAGESIZE);
         }
 
-        uintptr_t cgameProcess = mapper.GetARMAddress("CGame::Process");
-        if (!g_gtasaLib.loaded || cgameProcess == 0)
+        constexpr bool kEnableCGameProcessHook = false;
+        if (!kEnableCGameProcessHook)
         {
-            LOGW("CGame::Process not resolved; skipping hook");
+            LOGW("CGame::Process hook disabled for crash triage");
         }
         else
         {
-            uint32_t offset = static_cast<uint32_t>(cgameProcess - g_gtasaLib.base);
-            uintptr_t trampoline = 0;
-#if defined(__aarch64__)
-            constexpr size_t prologSize = 16;
-#else
-            constexpr size_t prologSize = 8;
-#endif
-            if (Hooks::ARMHookInstallWithOriginal(offset,
-                                                 (uintptr_t)&Hook_CGame_Process_Resolved,
-                                                 &trampoline, prologSize))
+            uintptr_t cgameProcess = mapper.GetARMAddress("CGame::Process");
+            if (!g_gtasaLib.loaded || cgameProcess == 0)
             {
-                g_origCGameProcess = reinterpret_cast<CGameProcess_t>(trampoline);
-                installedAny = true;
-                LOGI("Installed CGame::Process hook at 0x%lX", cgameProcess);
+                LOGW("CGame::Process not resolved; skipping hook");
             }
             else
             {
-                LOGW("Failed to install CGame::Process hook");
+                uint32_t offset = static_cast<uint32_t>(cgameProcess - g_gtasaLib.base);
+                uintptr_t trampoline = 0;
+#if defined(__aarch64__)
+                constexpr size_t prologSize = 16;
+#else
+                constexpr size_t prologSize = 8;
+#endif
+                if (Hooks::ARMHookInstallWithOriginal(offset,
+                                                     (uintptr_t)&Hook_CGame_Process_Resolved,
+                                                     &trampoline, prologSize))
+                {
+                    g_origCGameProcess = reinterpret_cast<CGameProcess_t>(trampoline);
+                    installedAny = true;
+                    LOGI("Installed CGame::Process hook at 0x%lX", cgameProcess);
+                }
+                else
+                {
+                    LOGW("Failed to install CGame::Process hook");
+                }
             }
         }
 
@@ -353,13 +362,15 @@ namespace MTA::Android
 
                 if (elapsed >= 5000)  // Every 5 seconds
                 {
-                    // Send a minimal PURESYNC packet as keepalive (position 0,0,0)
-                    g_serverConnection->SendPlayerSync(0, 0, 0, 0, 0, 0, 0, true);
+                    // Avoid sending 0,0,0 puresync keepalives that get relayed to peers.
                     lastKeepalive = now;
 
-                    if (++keepaliveCount % 3 == 0)  // Log every 3rd keepalive (every 15 seconds)
+                    if (!MTA::Android::Game::CGameBypass::GetInstance().IsLocalPlayerSpawned())
                     {
-                        LOGI("Sent keepalive packet #%d (waiting for game to spawn player)", keepaliveCount);
+                        if (++keepaliveCount % 3 == 0)  // Log every 3rd interval (every 15 seconds)
+                        {
+                            LOGI("Skipping keepalive while waiting for local player spawn");
+                        }
                     }
                 }
             }
@@ -411,8 +422,12 @@ namespace MTA::Android
             LOGI("Version: %s", result.serverVersion.c_str());
             LOGI("===========================================");
 
-            // Start player sync after successful connection
-            StartPlayerSync();
+            // Request initial data stream (server will send player list, map entities, etc.)
+            if (g_packetHandler)
+            {
+                g_packetHandler->SendCoreRPC(1);
+                LOGI("Sent INITIAL_DATA_STREAM RPC");
+            }
         };
         callbacks.onDisconnected = [](const std::string& reason) {
             LOGI("Disconnected: %s", reason.c_str());
@@ -668,6 +683,13 @@ namespace MTA::Android
         {
             LOGE("Cannot start sync: GTA:SA not loaded");
             return;
+        }
+
+        // Send ingame notice once (tells server we are fully in-game)
+        if (g_packetHandler && !g_sentIngameNotice.exchange(true))
+        {
+            g_packetHandler->SendCoreRPC(0);
+            LOGI("Sent PLAYER_INGAME_NOTICE RPC");
         }
 
         // Start player manager processing (for remote players)

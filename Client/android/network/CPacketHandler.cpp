@@ -20,7 +20,6 @@
 
 namespace MTA::Android::Network
 {
-
 static uint64_t GetCurrentTimeMs()
 {
     auto now = std::chrono::steady_clock::now();
@@ -396,6 +395,17 @@ void CPacketHandler::SendRPC(RPCFunction function, NetBitStream& data)
                           Protocol::PRIORITY_HIGH, Protocol::RELIABILITY_RELIABLE);
 }
 
+void CPacketHandler::SendCoreRPC(uint8_t functionId)
+{
+    if (!m_network) return;
+
+    auto bitStream = m_network->AllocateBitStream();
+    bitStream->Write(functionId);
+
+    m_network->SendPacket(PacketID::RPC, *bitStream,
+                          Protocol::PRIORITY_HIGH, Protocol::RELIABILITY_RELIABLE);
+}
+
 //=============================================================================
 // Packet Handlers - Connection
 //=============================================================================
@@ -407,14 +417,29 @@ void CPacketHandler::Packet_ServerJoinComplete(NetBitStream& bitStream)
 
 void CPacketHandler::Packet_ServerJoined(NetBitStream& bitStream)
 {
-    // Read player ID
-    bitStream.Read(m_localPlayerId);
+    uint16_t playerId = 0;
+    uint8_t playerCount = 0;
+    uint16_t rootElementId = 0;
 
-    LOGI("CPacketHandler: Joined game with player ID %u", m_localPlayerId);
+    if (!bitStream.Read(playerId) || !bitStream.Read(playerCount) || !bitStream.Read(rootElementId))
+    {
+        LOGE("CPacketHandler: Failed to read JOINED_GAME payload");
+        return;
+    }
+
+    m_localPlayerId = playerId;
+
+    LOGI("CPacketHandler: Joined game with player ID %u (count=%u root=%u)",
+         m_localPlayerId, playerCount, rootElementId);
 
     // Set local player ID in player manager
     auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
     playerMgr.SetLocalPlayerId(m_localPlayerId);
+
+    // Request initial data stream (matches PC client behavior)
+    // RPC function IDs for core network: 0=PLAYER_INGAME_NOTICE, 1=INITIAL_DATA_STREAM
+    SendCoreRPC(1);
+    LOGI("CPacketHandler: Sent INITIAL_DATA_STREAM RPC");
 
     if (m_callbacks.onConnected)
     {
@@ -441,40 +466,205 @@ void CPacketHandler::Packet_ServerDisconnected(NetBitStream& bitStream)
 
 void CPacketHandler::Packet_PlayerList(NetBitStream& bitStream)
 {
-    uint16_t playerCount;
-    if (!bitStream.Read(playerCount))
-    {
-        LOGE("CPacketHandler: Failed to read player count");
-        return;
-    }
-
-    LOGI("CPacketHandler: Received player list with %d players", playerCount);
+    // Server packet layout does NOT include a player count; it starts with a flag bit and
+    // streams entries until EOF. Parsing the count here desyncs the stream.
+    bool showInChat = bitStream.ReadBit();
+    (void)showInChat;
 
     auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
+    int parsedPlayers = 0;
 
-    for (uint16_t i = 0; i < playerCount; ++i)
+    while (bitStream.GetUnreadBits() >= static_cast<int>(ELEMENT_ID_BITS + 16))
     {
-        uint32_t playerId;
+        bool parseOk = true;
+        uint32_t playerId = 0;
+        if (!ReadElementId(bitStream, playerId))
+            break;
+
+        uint8_t syncTimeContext = 0;
+        if (!bitStream.Read(syncTimeContext))
+            break;
+
+        uint8_t nicknameLength = 0;
+        if (!bitStream.Read(nicknameLength))
+            break;
+        if (nicknameLength > 64)
+        {
+            LOGW("CPacketHandler: Invalid nickname length %u", nicknameLength);
+            break;
+        }
+
         std::string nickname;
-        uint16_t nicknameLength;
-
-        if (!ReadElementId(bitStream, playerId)) break;
-        if (!bitStream.Read(nicknameLength)) break;
-        if (nicknameLength > 256) break;
-
         nickname.resize(nicknameLength);
-        if (!bitStream.Read(&nickname[0], nicknameLength)) break;
+        if (nicknameLength > 0 && !bitStream.Read(&nickname[0], nicknameLength))
+            break;
 
-        LOGD("CPacketHandler: Player %d: %s", playerId, nickname.c_str());
+        uint16_t bitStreamVersion = 0;
+        uint32_t buildNumber = 0;
+        if (!bitStream.Read(bitStreamVersion)) break;
+        if (!bitStream.Read(buildNumber)) break;
 
-        // Add to player manager
+        bool isDead = bitStream.ReadBit();
+        bool isSpawned = bitStream.ReadBit();
+        bool isInVehicle = bitStream.ReadBit();
+        bool hasJetpack = bitStream.ReadBit();
+        bool nametagShowing = bitStream.ReadBit();
+        bool nametagColorOverridden = bitStream.ReadBit();
+        bool isHeadless = bitStream.ReadBit();
+        bool isFrozen = bitStream.ReadBit();
+        (void)isDead;
+        (void)hasJetpack;
+        (void)nametagShowing;
+        (void)isHeadless;
+        (void)isFrozen;
+
+        uint8_t nametagTextLength = 0;
+        if (!bitStream.Read(nametagTextLength)) break;
+        if (nametagTextLength > 0)
+        {
+            std::string nametagText;
+            nametagText.resize(nametagTextLength);
+            if (!bitStream.Read(&nametagText[0], nametagTextLength))
+                break;
+        }
+
+        if (nametagColorOverridden)
+        {
+            uint8_t r = 0, g = 0, b = 0;
+            if (!bitStream.Read(r)) break;
+            if (!bitStream.Read(g)) break;
+            if (!bitStream.Read(b)) break;
+        }
+
+        uint8_t moveAnim = 0;
+        if (!bitStream.Read(moveAnim)) break;
+        (void)moveAnim;
+
+        Multiplayer::RemoteSyncData initialSync;
+        initialSync.syncTimeContext = syncTimeContext;
+        initialSync.lastSyncTime = GetCurrentTimeMs();
+
+        if (isSpawned)
+        {
+            uint16_t modelId = 0;
+            if (!bitStream.ReadCompressed(modelId)) break;
+
+            bool hasTeam = bitStream.ReadBit();
+            if (hasTeam)
+            {
+                uint32_t teamId = 0;
+                if (!ReadElementId(bitStream, teamId)) break;
+            }
+
+            if (isInVehicle)
+            {
+                uint32_t vehicleId = 0;
+                if (!ReadElementId(bitStream, vehicleId)) break;
+
+                uint8_t seatBits = 0;
+                if (!bitStream.ReadBits(&seatBits, 4)) break;
+
+                initialSync.isInVehicle = true;
+                initialSync.vehicleId = vehicleId;
+                initialSync.vehicleSeat = seatBits & 0x0F;
+            }
+            else
+            {
+                float x = 0.0f;
+                float y = 0.0f;
+                float z = 0.0f;
+                if (!ReadFixedPoint(bitStream, 14, 10, x)) break;
+                if (!ReadFixedPoint(bitStream, 14, 10, y)) break;
+                if (!bitStream.Read(z)) break;
+
+                float rotation = ReadFloatAsBits(bitStream, 16, -PI, PI);
+
+                initialSync.position = Multiplayer::CVector3D(x, y, z);
+                initialSync.targetPosition = initialSync.position;
+                initialSync.rotation = rotation;
+                initialSync.targetRotation = rotation;
+            }
+
+            uint16_t dimension = 0;
+            if (!bitStream.ReadCompressed(dimension)) break;
+
+            uint8_t fightingStyle = 0;
+            if (!bitStream.Read(fightingStyle)) break;
+            (void)fightingStyle;
+
+            uint16_t alphaCompressed = 0;
+            if (!bitStream.ReadCompressed(alphaCompressed)) break;
+
+            uint8_t interior = 0;
+            if (!bitStream.Read(interior)) break;
+            (void)interior;
+
+            for (unsigned char i = 0; i < 16; ++i)
+            {
+                bool hasWeapon = bitStream.ReadBit();
+                if (hasWeapon)
+                {
+                    uint8_t weaponBits = 0;
+                    if (!bitStream.ReadBits(&weaponBits, 6))
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                }
+            }
+            if (!parseOk)
+                break;
+
+            bool animRunning = bitStream.ReadBit();
+            if (animRunning)
+            {
+                std::string blockName;
+                std::string animName;
+                if (!bitStream.Read(blockName, 256)) break;
+                if (!bitStream.Read(animName, 256)) break;
+
+                float animTime = 0.0f;
+                if (!bitStream.Read(animTime)) break;
+
+                bool loop = bitStream.ReadBit();
+                bool updatePosition = bitStream.ReadBit();
+                bool interruptable = bitStream.ReadBit();
+                bool freezeLastFrame = bitStream.ReadBit();
+                (void)loop;
+                (void)updatePosition;
+                (void)interruptable;
+                (void)freezeLastFrame;
+
+                float blendTime = 0.0f;
+                if (!bitStream.Read(blendTime)) break;
+
+                bool taskRestore = bitStream.ReadBit();
+                (void)taskRestore;
+
+                double startTime = 0.0;
+                if (!bitStream.Read(startTime)) break;
+
+                float speed = 0.0f;
+                if (!bitStream.Read(speed)) break;
+            }
+        }
+
+        // Add/update player entry
         playerMgr.AddPlayer(playerId, nickname);
+        if (isSpawned && !isInVehicle)
+        {
+            playerMgr.UpdatePlayerSync(playerId, initialSync);
+        }
 
         if (m_callbacks.onPlayerJoin)
         {
             m_callbacks.onPlayerJoin(playerId, nickname);
         }
+
+        ++parsedPlayers;
     }
+
+    LOGI("CPacketHandler: Parsed player list entries: %d", parsedPlayers);
 }
 
 void CPacketHandler::Packet_PlayerJoin(NetBitStream& bitStream)
@@ -482,8 +672,79 @@ void CPacketHandler::Packet_PlayerJoin(NetBitStream& bitStream)
     uint32_t playerId;
     std::string nickname;
 
-    if (!ReadElementId(bitStream, playerId)) return;
-    if (!bitStream.Read(nickname, 256)) return;
+    static int s_debugJoinCount = 0;
+    const bool debug = (s_debugJoinCount < 5);
+    auto logPos = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        LOGD("PLAYER_JOIN %s: read=%d/%d unread=%d",
+             label,
+             bitStream.GetReadOffsetBits(),
+             bitStream.GetBitsUsed(),
+             bitStream.GetUnreadBits());
+    };
+    auto logHex = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        const uint8_t* data = bitStream.GetData();
+        const int bytesUsed = bitStream.GetBytesUsed();
+        const int dumpBytes = std::min(bytesUsed, 32);
+        char buffer[256];
+        int offset = 0;
+        offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%s bytes=", label);
+        for (int i = 0; i < dumpBytes && offset < static_cast<int>(sizeof(buffer)); ++i)
+        {
+            offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", data[i]);
+        }
+        LOGD("PLAYER_JOIN %s", buffer);
+    };
+    auto fail = [&](const char* label)
+    {
+        if (debug)
+        {
+            LOGD("PLAYER_JOIN failed %s", label);
+            logPos("fail");
+            logHex("fail");
+            ++s_debugJoinCount;
+        }
+    };
+
+    logPos("start");
+    logHex("start");
+    if (!ReadElementId(bitStream, playerId))
+    {
+        fail("playerId");
+        return;
+    }
+    logPos("after playerId");
+
+    uint16_t nicknameLength = 0;
+    if (!bitStream.Read(nicknameLength))
+    {
+        fail("nicknameLength");
+        return;
+    }
+    if (nicknameLength > 256)
+    {
+        LOGD("PLAYER_JOIN invalid nickname length %u", nicknameLength);
+        fail("nicknameLength > 256");
+        return;
+    }
+    nickname.resize(nicknameLength);
+    if (nicknameLength > 0 && !bitStream.Read(&nickname[0], nicknameLength))
+    {
+        fail("nickname");
+        return;
+    }
+    logPos("after nickname");
+
+    if (debug)
+    {
+        LOGD("PLAYER_JOIN parsed id=%u nickLen=%u nick='%s'", playerId, nicknameLength, nickname.c_str());
+        ++s_debugJoinCount;
+    }
 
     LOGI("CPacketHandler: Player joined: %s (ID: %u)", nickname.c_str(), playerId);
 
@@ -520,18 +781,105 @@ void CPacketHandler::Packet_PlayerQuit(NetBitStream& bitStream)
 void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
 {
     uint32_t playerId;
+    uint8_t flags = 0;
     float x, y, z;
     float rotation;
     uint16_t skinId;
+    uint8_t interior = 0;
+    uint16_t dimension = 0;
+    uint32_t teamId = 0;
+    uint8_t timeContext = 0;
 
-    if (!ReadElementId(bitStream, playerId)) return;
-    if (!bitStream.Read(x)) return;
-    if (!bitStream.Read(y)) return;
-    if (!bitStream.Read(z)) return;
-    if (!bitStream.Read(rotation)) return;
-    if (!bitStream.Read(skinId)) return;
+    static int s_debugSpawnCount = 0;
+    const bool debug = (s_debugSpawnCount < 5);
+    auto logPos = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        LOGD("PLAYER_SPAWN %s: read=%d/%d unread=%d",
+             label,
+             bitStream.GetReadOffsetBits(),
+             bitStream.GetBitsUsed(),
+             bitStream.GetUnreadBits());
+    };
+    auto logHex = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        const uint8_t* data = bitStream.GetData();
+        const int bytesUsed = bitStream.GetBytesUsed();
+        const int dumpBytes = std::min(bytesUsed, 32);
+        char buffer[256];
+        int offset = 0;
+        offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%s bytes=", label);
+        for (int i = 0; i < dumpBytes && offset < static_cast<int>(sizeof(buffer)); ++i)
+        {
+            offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", data[i]);
+        }
+        LOGD("PLAYER_SPAWN %s", buffer);
+    };
+    auto readOk = [&](bool ok, const char* label) -> bool
+    {
+        if (ok)
+            return true;
+        if (debug)
+        {
+            LOGD("PLAYER_SPAWN failed %s", label);
+            logPos("fail");
+            logHex("fail");
+            ++s_debugSpawnCount;
+        }
+        return false;
+    };
+
+    logPos("start");
+    logHex("start");
+    if (!readOk(ReadElementId(bitStream, playerId), "playerId")) return;
+    logPos("after playerId");
+    if (!readOk(bitStream.Read(flags), "flags")) return;
+    logPos("after flags");
+    if (!readOk(bitStream.Read(x), "x")) return;
+    logPos("after x");
+    if (!readOk(bitStream.Read(y), "y")) return;
+    logPos("after y");
+    if (!readOk(bitStream.Read(z), "z")) return;
+    logPos("after z");
+    if (!readOk(bitStream.Read(rotation), "rotation")) return;
+    logPos("after rotation");
+    if (!readOk(bitStream.Read(skinId), "skinId")) return;
+    logPos("after skinId");
+    if (!readOk(bitStream.Read(interior), "interior")) return;
+    logPos("after interior");
+    if (!readOk(bitStream.Read(dimension), "dimension")) return;
+    logPos("after dimension");
+    if (!readOk(ReadElementId(bitStream, teamId), "teamId")) return;
+    logPos("after teamId");
+    if (!readOk(bitStream.Read(timeContext), "timeContext")) return;
+    logPos("after timeContext");
+
+    (void)flags;
+    (void)interior;
+    (void)dimension;
+    (void)teamId;
+    (void)timeContext;
 
     LOGI("CPacketHandler: Player %u spawned at (%.1f, %.1f, %.1f)", playerId, x, y, z);
+    if (debug)
+    {
+        LOGD("PLAYER_SPAWN parsed id=%u flags=0x%02X pos=(%.3f,%.3f,%.3f) rot=%.3f skin=%u interior=%u dimension=%u team=%u time=%u",
+             playerId,
+             flags,
+             x,
+             y,
+             z,
+             rotation,
+             skinId,
+             interior,
+             dimension,
+             teamId,
+             timeContext);
+        ++s_debugSpawnCount;
+    }
 
     // Spawn in player manager
     auto& playerMgr = Multiplayer::CPlayerManager::GetInstance();
@@ -579,56 +927,480 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
     uint32_t playerId;
     uint8_t syncTimeContext = 0;
     uint16_t latency = 0;
+    static int s_debugSyncCount = 0;
+    const bool debug = (s_debugSyncCount < 10);
+    auto logPosNoId = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        LOGD("PURESYNC %s: read=%d/%d unread=%d",
+             label,
+             bitStream.GetReadOffsetBits(),
+             bitStream.GetBitsUsed(),
+             bitStream.GetUnreadBits());
+    };
+    auto logHexNoId = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        const uint8_t* data = bitStream.GetData();
+        const int bytesUsed = bitStream.GetBytesUsed();
+        const int dumpBytes = std::min(bytesUsed, 8);
+        char buffer[128];
+        int offset = 0;
+        offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%s bytesUsed=%d bitsUsed=%d bytes=",
+                                label,
+                                bytesUsed,
+                                bitStream.GetBitsUsed());
+        for (int i = 0; i < dumpBytes && offset < static_cast<int>(sizeof(buffer)); ++i)
+        {
+            offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", data[i]);
+        }
+        LOGD("PURESYNC %s", buffer);
+    };
+    auto isLikelyAligned = [&](int offsetBits) -> bool
+    {
+        NetBitStream probe(bitStream.GetData(), bitStream.GetBytesUsed());
+        if (offsetBits > 0)
+        {
+            probe.SetReadOffsetBits(offsetBits);
+        }
+
+        uint32_t probePlayerId = 0;
+        if (!ReadElementId(probe, probePlayerId)) return false;
+
+        uint8_t probeTimeContext = 0;
+        if (!probe.Read(probeTimeContext)) return false;
+
+        uint16_t probeLatency = 0;
+        if (!probe.ReadCompressed(probeLatency)) return false;
+
+        SControllerState probeController{};
+        if (!ReadFullKeysync(probeController, probe)) return false;
+
+        uint32_t rawFlags = 0;
+        if (!ReadBitsToUInt(probe, rawFlags, SPlayerPuresyncFlags::BITCOUNT)) return false;
+
+        if (rawFlags & (1u << 5))
+        {
+            uint32_t contactId = 0;
+            if (!ReadElementId(probe, contactId)) return false;
+        }
+
+        SPcPositionSync position(false);
+        if (!position.Read(probe)) return false;
+
+        return !(position.x == 0.0f && position.y == 0.0f && position.z == 0.0f);
+    };
+
+    int startOffsetBits = 0;
+    for (int offset = 0; offset <= 8; ++offset)
+    {
+        if (isLikelyAligned(offset))
+        {
+            startOffsetBits = offset;
+            if (debug && offset != 0)
+            {
+                LOGD("PURESYNC: applying %d-bit framing offset", offset);
+            }
+            break;
+        }
+    }
+    if (startOffsetBits > 0)
+    {
+        bitStream.SetReadOffsetBits(startOffsetBits);
+    }
+
+    auto logPos = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        LOGD("PURESYNC[%u] %s: read=%d/%d unread=%d",
+             playerId,
+             label,
+             bitStream.GetReadOffsetBits(),
+             bitStream.GetBitsUsed(),
+             bitStream.GetUnreadBits());
+    };
+    auto logHex = [&](const char* label)
+    {
+        if (!debug)
+            return;
+        const uint8_t* data = bitStream.GetData();
+        const int bytesUsed = bitStream.GetBytesUsed();
+        const int dumpBytes = std::min(bytesUsed, 8);
+        char buffer[128];
+        int offset = 0;
+        offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%s bytes=", label);
+        for (int i = 0; i < dumpBytes && offset < static_cast<int>(sizeof(buffer)); ++i)
+        {
+            offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%02X ", data[i]);
+        }
+        LOGD("PURESYNC[%u] %s", playerId, buffer);
+    };
+    auto debugParseWithPlayerIdBits = [&](int playerIdBits)
+    {
+        if (!debug)
+            return;
+        const int savedOffset = bitStream.GetReadOffsetBits();
+        bitStream.SetReadOffsetBits(startOffsetBits);
+        uint32_t pid = 0;
+        bool okPid = ReadBitsToUInt(bitStream, pid, static_cast<size_t>(playerIdBits));
+        uint8_t timeContext = 0;
+        bool okTime = bitStream.Read(timeContext);
+        uint16_t latencyTmp = 0;
+        bool okLatency = bitStream.ReadCompressed(latencyTmp);
+        SControllerState tmpController{};
+        SFullKeysyncDebug ksDebug{};
+        bool okKeys = ReadFullKeysync(tmpController, bitStream, &ksDebug);
+        const int offsetAfter = bitStream.GetReadOffsetBits();
+        LOGD("PURESYNC[%u] probe pidBits=%d ok=%d/%d/%d/%d pid=%u time=%u lat=%u keys=0x%02X sq=%d cr=%d lx=%d ly=%d off=%d",
+             playerId,
+             playerIdBits,
+             okPid ? 1 : 0,
+             okTime ? 1 : 0,
+             okLatency ? 1 : 0,
+             okKeys ? 1 : 0,
+             pid,
+             timeContext,
+             latencyTmp,
+             ksDebug.keyBits,
+             ksDebug.hasButtonSquare ? 1 : 0,
+             ksDebug.hasButtonCross ? 1 : 0,
+             ksDebug.leftX,
+             ksDebug.leftY,
+             offsetAfter);
+        bitStream.SetReadOffsetBits(savedOffset);
+    };
+    auto debugProbeOffset = [&](int offsetBits, const char* label)
+    {
+        if (!debug)
+            return;
+        NetBitStream probe(bitStream.GetData(), bitStream.GetBytesUsed());
+        if (offsetBits > 0)
+        {
+            probe.SetReadOffsetBits(offsetBits);
+        }
+        uint32_t pid = 0;
+        bool okPid = ReadElementId(probe, pid);
+        uint8_t timeContext = 0;
+        bool okTime = probe.Read(timeContext);
+        uint16_t latencyTmp = 0;
+        bool okLatency = probe.ReadCompressed(latencyTmp);
+        SControllerState tmpController{};
+        SFullKeysyncDebug ksDebug{};
+        bool okKeys = ReadFullKeysync(tmpController, probe, &ksDebug);
+        LOGD("PURESYNC probe %s off=%d ok=%d/%d/%d/%d pid=%u time=%u lat=%u keys=0x%02X lx=%d ly=%d read=%d",
+             label,
+             offsetBits,
+             okPid ? 1 : 0,
+             okTime ? 1 : 0,
+             okLatency ? 1 : 0,
+             okKeys ? 1 : 0,
+             pid,
+             timeContext,
+             latencyTmp,
+             ksDebug.keyBits,
+             ksDebug.leftX,
+             ksDebug.leftY,
+             probe.GetReadOffsetBits());
+    };
+
+    logHexNoId("start");
+    logPosNoId("start");
+    debugProbeOffset(0, "offset0");
+    debugProbeOffset(8, "offset8");
 
     // Read player ID first (added by server relay)
-    if (!ReadElementId(bitStream, playerId)) return;
+    logPosNoId("before playerId");
+    if (!ReadElementId(bitStream, playerId))
+    {
+        LOGD("PURESYNC: Failed to read playerId: read=%d/%d unread=%d",
+             bitStream.GetReadOffsetBits(),
+             bitStream.GetBitsUsed(),
+             bitStream.GetUnreadBits());
+        return;
+    }
+    logHex("packet");
+    logPos("after playerId");
+    debugParseWithPlayerIdBits(16);
+    debugParseWithPlayerIdBits(17);
+    debugParseWithPlayerIdBits(18);
 
     // Skip if this is our own sync (server echoing)
     if (playerId == m_localPlayerId)
         return;
 
-    if (!bitStream.Read(syncTimeContext)) return;
-    if (!bitStream.ReadCompressed(latency)) return;
+    logPos("before timeContext");
+    if (!bitStream.Read(syncTimeContext))
+    {
+        LOGD("PURESYNC[%u] Failed to read timeContext", playerId);
+        logPos("timeContext fail");
+        return;
+    }
+    logPos("after timeContext");
+    if (debug)
+    {
+        const int savedOffset = bitStream.GetReadOffsetBits();
+        const bool isByte = bitStream.ReadBit();
+        bitStream.SetReadOffsetBits(savedOffset);
+        LOGD("PURESYNC[%u] latency selector bit=%d", playerId, isByte ? 1 : 0);
+    }
+    logPos("before latency");
+    if (!bitStream.ReadCompressed(latency))
+    {
+        LOGD("PURESYNC[%u] Failed to read latency", playerId);
+        logPos("latency fail");
+        return;
+    }
+    if (debug)
+    {
+        LOGD("PURESYNC[%u] latency=%u", playerId, latency);
+    }
+    logPos("after latency");
 
     SControllerState controllerState;
-    if (!ReadFullKeysync(controllerState, bitStream)) return;
+    SFullKeysyncDebug keysyncDebug;
+    logPos("before keysync");
+    if (!ReadFullKeysync(controllerState, bitStream, debug ? &keysyncDebug : nullptr))
+    {
+        LOGD("PURESYNC[%u] Failed to read full keysync", playerId);
+        logPos("keysync fail");
+        return;
+    }
+    logPos("after keysync");
+    if (debug)
+    {
+        LOGD("PURESYNC[%u] keysync bits=0x%02X sq=%d(%u) cr=%d(%u) lx=%d ly=%d",
+             playerId,
+             keysyncDebug.keyBits,
+             keysyncDebug.hasButtonSquare ? 1 : 0,
+             keysyncDebug.buttonSquare,
+             keysyncDebug.hasButtonCross ? 1 : 0,
+             keysyncDebug.buttonCross,
+             keysyncDebug.leftX,
+             keysyncDebug.leftY);
+    }
+
+    auto peekBits = [&](int offsetBits, size_t bitCount, bool msbFirst, bool msbSignificance) -> uint32_t
+    {
+        uint32_t value = 0;
+        const uint8_t* data = bitStream.GetData();
+        const int totalBits = bitStream.GetBitsUsed();
+        for (size_t i = 0; i < bitCount; ++i)
+        {
+            int bitIndex = offsetBits + static_cast<int>(i);
+            if (bitIndex >= totalBits)
+                break;
+            int byteIndex = bitIndex / 8;
+            int bitInByte = bitIndex % 8;
+            int shift = msbFirst ? (7 - bitInByte) : bitInByte;
+            bool bit = (data[byteIndex] >> shift) & 1;
+            if (bit)
+            {
+                const size_t dst = msbSignificance ? (bitCount - 1 - i) : i;
+                if (dst < 32)
+                    value |= (1u << dst);
+            }
+        }
+        return value;
+    };
 
     SPlayerPuresyncFlags flags;
-    if (!flags.Read(bitStream)) return;
+    uint32_t rawFlags = 0;
+    const int flagsOffset = bitStream.GetReadOffsetBits();
+    logPos("before flags");
+    if (!ReadBitsToUInt(bitStream, rawFlags, SPlayerPuresyncFlags::BITCOUNT))
+    {
+        LOGD("PURESYNC[%u] Failed to read flags", playerId);
+        logPos("flags fail");
+        return;
+    }
+    logPos("after flags");
+    flags.data.bIsInWater = (rawFlags & (1u << 0)) != 0;
+    flags.data.bIsOnGround = (rawFlags & (1u << 1)) != 0;
+    flags.data.bHasJetPack = (rawFlags & (1u << 2)) != 0;
+    flags.data.bIsDucked = (rawFlags & (1u << 3)) != 0;
+    flags.data.bWearsGoogles = (rawFlags & (1u << 4)) != 0;
+    flags.data.bHasContact = (rawFlags & (1u << 5)) != 0;
+    flags.data.bIsChoking = (rawFlags & (1u << 6)) != 0;
+    flags.data.bAkimboTargetUp = (rawFlags & (1u << 7)) != 0;
+    flags.data.bIsOnFire = (rawFlags & (1u << 8)) != 0;
+    flags.data.bHasAWeapon = (rawFlags & (1u << 9)) != 0;
+    flags.data.bSyncingVelocity = (rawFlags & (1u << 10)) != 0;
+    flags.data.bStealthAiming = (rawFlags & (1u << 11)) != 0;
+    flags.data.isReloadingWeapon = (rawFlags & (1u << 12)) != 0;
+    flags.data.animInterrupted = (rawFlags & (1u << 13)) != 0;
+    flags.data.hangingDuringClimb = (rawFlags & (1u << 14)) != 0;
+    if (debug)
+    {
+        uint32_t rawFlagsMsb = peekBits(flagsOffset, SPlayerPuresyncFlags::BITCOUNT, true, false);
+        uint32_t rawFlagsMsbSig = peekBits(flagsOffset, SPlayerPuresyncFlags::BITCOUNT, true, true);
+        LOGD("PURESYNC[%u] flags raw=0x%04X msb=0x%04X msbSig=0x%04X ground=%d water=%d ducked=%d contact=%d weapon=%d vel=%d",
+             playerId,
+             rawFlags,
+             rawFlagsMsb,
+             rawFlagsMsbSig,
+             flags.data.bIsOnGround,
+             flags.data.bIsInWater,
+             flags.data.bIsDucked,
+             flags.data.bHasContact,
+             flags.data.bHasAWeapon,
+             flags.data.bSyncingVelocity);
+    }
 
-    if (flags.hasContact)
+    if (flags.data.bHasContact)
     {
         uint32_t contactId = 0;
-        if (!ReadElementId(bitStream, contactId)) return;
+        logPos("before contact");
+        if (!ReadElementId(bitStream, contactId))
+        {
+            LOGD("PURESYNC[%u] Failed to read contactId", playerId);
+            logPos("contact fail");
+            return;
+        }
+        logPos("after contact");
     }
 
     SPcPositionSync position(false);
-    if (!position.Read(bitStream)) return;
+    const int positionOffset = bitStream.GetReadOffsetBits();
+    logPos("before position");
+    if (!position.Read(bitStream))
+    {
+        LOGD("PURESYNC[%u] Failed to read position", playerId);
+        LOGD("PURESYNC[%u] position values: x=%.3f y=%.3f z=%.3f",
+             playerId,
+             position.x,
+             position.y,
+             position.z);
+        if (debug)
+        {
+            const int originalOffset = bitStream.GetReadOffsetBits();
+            bitStream.SetReadOffsetBits(positionOffset);
+            SFloatSync<14, 10> sx;
+            SFloatSync<14, 10> sy;
+            const bool okX = sx.Read(bitStream);
+            const bool okY = sy.Read(bitStream);
+            bitStream.SetReadOffsetBits(originalOffset);
+            LOGD("PURESYNC[%u] syncXY: ok=%d x=%.3f y=%.3f",
+                 playerId,
+                 (okX && okY) ? 1 : 0,
+                 sx.data.fValue,
+                 sy.data.fValue);
+
+            uint32_t rawXMsb = peekBits(positionOffset, 24, true, false);
+            uint32_t rawYMsb = peekBits(positionOffset + 24, 24, true, false);
+            uint32_t rawXMsbSig = peekBits(positionOffset, 24, true, true);
+            uint32_t rawYMsbSig = peekBits(positionOffset + 24, 24, true, true);
+            auto decodeFixed = [](uint32_t raw, int totalBits, int fracBits) -> float
+            {
+                const uint32_t signBit = 1u << (totalBits - 1);
+                int32_t signedValue = 0;
+                if (raw & signBit)
+                {
+                    uint32_t mask = ~((1u << totalBits) - 1u);
+                    signedValue = static_cast<int32_t>(raw | mask);
+                }
+                else
+                {
+                    signedValue = static_cast<int32_t>(raw);
+                }
+                return static_cast<float>(signedValue) / static_cast<float>(1 << fracBits);
+            };
+            LOGD("PURESYNC[%u] syncXY-msb: x=%.3f y=%.3f",
+                 playerId,
+                 decodeFixed(rawXMsb, 24, 10),
+                 decodeFixed(rawYMsb, 24, 10));
+            LOGD("PURESYNC[%u] syncXY-msbSig: x=%.3f y=%.3f",
+                 playerId,
+                 decodeFixed(rawXMsbSig, 24, 10),
+                 decodeFixed(rawYMsbSig, 24, 10));
+
+            const struct
+            {
+                int bits;
+                const char* label;
+            } probes[] = {
+                {17, "probe+contact"},
+                {8, "probe+weaponType"},
+                {4, "probe+weaponSlot"},
+                {25, "probe+contact+weaponType"},
+                {21, "probe+contact+weaponSlot"},
+                {29, "probe+contact+weaponType+weaponSlot"},
+            };
+            for (const auto& probe : probes)
+            {
+                bitStream.SetReadOffsetBits(positionOffset + probe.bits);
+                SPcPositionSync probePos(false);
+                const bool ok = probePos.Read(bitStream);
+                LOGD("PURESYNC[%u] %s: ok=%d pos=(%.1f,%.1f,%.1f)",
+                     playerId,
+                     probe.label,
+                     ok ? 1 : 0,
+                     probePos.x,
+                     probePos.y,
+                     probePos.z);
+            }
+            bitStream.SetReadOffsetBits(originalOffset);
+        }
+        logPos("position fail");
+        return;
+    }
+    logPos("after position");
 
     SPcPedRotationSync rotationSync;
-    if (!rotationSync.Read(bitStream)) return;
+    logPos("before rotation");
+    if (!rotationSync.Read(bitStream))
+    {
+        LOGD("PURESYNC[%u] Failed to read rotation", playerId);
+        logPos("rotation fail");
+        return;
+    }
+    logPos("after rotation");
 
     SPcVelocitySync velocitySync;
-    if (flags.syncingVelocity)
+    if (flags.data.bSyncingVelocity)
     {
-        if (!velocitySync.Read(bitStream)) return;
+        logPos("before velocity");
+        if (!velocitySync.Read(bitStream))
+        {
+            LOGD("PURESYNC[%u] Failed to read velocity", playerId);
+            logPos("velocity fail");
+            return;
+        }
+        logPos("after velocity");
     }
 
-    uint8_t health = 100;
-    uint8_t armor = 0;
-    if (!bitStream.Read(health)) return;
-    if (!bitStream.Read(armor)) return;
+    float healthValue = ReadFloatAsBits(bitStream, 8, 0.0f, 255.0f);
+    float armorValue = ReadFloatAsBits(bitStream, 8, 0.0f, 127.5f);
+    uint8_t health = static_cast<uint8_t>(std::clamp(healthValue, 0.0f, 255.0f));
+    uint8_t armor = static_cast<uint8_t>(std::clamp(armorValue, 0.0f, 255.0f));
+    logPos("after health/armor");
 
     SPcCameraRotationSync camRotation;
-    if (!camRotation.Read(bitStream)) return;
+    logPos("before camera rotation");
+    if (!camRotation.Read(bitStream))
+    {
+        LOGD("PURESYNC[%u] Failed to read camera rotation", playerId);
+        logPos("camera rot fail");
+        return;
+    }
+    logPos("after camera rotation");
 
     uint8_t weaponSlot = 0;
     uint16_t ammoInClip = 0;
-    if (flags.hasAWeapon)
+    if (flags.data.bHasAWeapon)
     {
         SPcWeaponSlotSync slot;
-        if (!slot.Read(bitStream)) return;
+        logPos("before weapon slot");
+        if (!slot.Read(bitStream))
+        {
+            LOGD("PURESYNC[%u] Failed to read weapon slot", playerId);
+            logPos("weapon slot fail");
+            return;
+        }
         weaponSlot = slot.slot;
+        logPos("after weapon slot");
 
         auto doesSlotHaveAmmo = [](uint8_t slotId) -> bool {
             switch (slotId)
@@ -647,12 +1419,25 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
         if (doesSlotHaveAmmo(weaponSlot))
         {
             SWeaponAmmoSync ammo;
-            if (!ammo.Read(bitStream, true, true)) return;
+            logPos("before ammo");
+            if (!ammo.Read(bitStream, false, true))
+            {
+                LOGD("PURESYNC[%u] Failed to read ammo", playerId);
+                logPos("ammo fail");
+                return;
+            }
             ammoInClip = ammo.ammoInClip;
+            logPos("after ammo");
 
             const bool aimFull = (controllerState.RightShoulder1 != 0) || (controllerState.ButtonCircle != 0);
             SWeaponAimSync aim(0.0f, aimFull);
-            if (!aim.Read(bitStream)) return;
+            if (!aim.Read(bitStream))
+            {
+                LOGD("PURESYNC[%u] Failed to read aim", playerId);
+                logPos("aim fail");
+                return;
+            }
+            logPos("after aim");
         }
     }
 
@@ -680,9 +1465,9 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
     syncData.weaponSlot = weaponSlot;
     syncData.ammo = ammoInClip;
     syncData.syncTimeContext = syncTimeContext;
-    syncData.isOnGround = flags.isOnGround;
-    syncData.isInWater = flags.isInWater;
-    syncData.isDucked = flags.isDucked;
+    syncData.isOnGround = flags.data.bIsOnGround;
+    syncData.isInWater = flags.data.bIsInWater;
+    syncData.isDucked = flags.data.bIsDucked;
     syncData.controllerLeftStickX = leftStickX;
     syncData.controllerLeftStickY = leftStickY;
     syncData.keyFlags = keyFlags;
@@ -704,6 +1489,12 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
         LOGD("PURESYNC from player %u: pos=(%.1f,%.1f,%.1f) rot=%.2f health=%d",
              playerId, position.x, position.y, position.z, rotationSync.rotation, health);
         syncLogCount = 0;
+    }
+
+    if (debug)
+    {
+        logPos("end");
+        ++s_debugSyncCount;
     }
 }
 

@@ -432,6 +432,52 @@ inline void CPadHooks::Hook_ProcessControl(uintptr_t thiz)
         return;
     }
 
+    #if defined(__aarch64__)
+        static int s_loggedAnyPed = 0;
+        if (s_loggedAnyPed < 10)
+        {
+            uintptr_t v538 = *reinterpret_cast<uintptr_t*>(thiz + 0x538);
+            uintptr_t v590 = *reinterpret_cast<uintptr_t*>(thiz + 0x590);
+            uintptr_t v598 = *reinterpret_cast<uintptr_t*>(thiz + 0x598);
+            uintptr_t v5a0 = *reinterpret_cast<uintptr_t*>(thiz + 0x5A0);
+            uintptr_t v5a8 = *reinterpret_cast<uintptr_t*>(thiz + 0x5A8);
+            PAD_LOGW("ProcessControl ped 0x%lx slot=%u offsets: 0x538=0x%lx 0x590=0x%lx 0x598=0x%lx 0x5A0=0x%lx 0x5A8=0x%lx",
+                     (unsigned long)thiz,
+                     playerSlot,
+                     (unsigned long)v538,
+                     (unsigned long)v590,
+                     (unsigned long)v598,
+                     (unsigned long)v5a0,
+                     (unsigned long)v5a8);
+            s_loggedAnyPed++;
+        }
+    #endif
+
+    if (playerSlot > 0)
+    {
+#if defined(__aarch64__)
+        // Guard against partially initialized remote peds causing null deref in GTA damage logic.
+        constexpr uintptr_t PED_INTELLIGENCE_ALT2_OFFSET = 0x538; // SA-MP 2.10 layout candidate
+        constexpr uintptr_t PED_INTELLIGENCE_OFFSET = 0x598;
+        constexpr uintptr_t PED_INTELLIGENCE_ALT_OFFSET = 0x5A8;
+        constexpr uintptr_t PED_PLAYERDATA_OFFSET = 0x5A0;
+        uintptr_t intelligenceAlt2 = *reinterpret_cast<uintptr_t*>(thiz + PED_INTELLIGENCE_ALT2_OFFSET);
+        uintptr_t intelligence = *reinterpret_cast<uintptr_t*>(thiz + PED_INTELLIGENCE_OFFSET);
+        uintptr_t intelligenceAlt = *reinterpret_cast<uintptr_t*>(thiz + PED_INTELLIGENCE_ALT_OFFSET);
+        uintptr_t playerData = *reinterpret_cast<uintptr_t*>(thiz + PED_PLAYERDATA_OFFSET);
+        if ((intelligence == 0 && intelligenceAlt == 0 && intelligenceAlt2 == 0) || playerData == 0)
+        {
+            PAD_LOGW("ProcessControl: remote ped 0x%lx missing state (int=0x%lx alt=0x%lx alt2=0x%lx pdata=0x%lx) - skipping",
+                     (unsigned long)thiz,
+                     (unsigned long)intelligence,
+                     (unsigned long)intelligenceAlt,
+                     (unsigned long)intelligenceAlt2,
+                     (unsigned long)playerData);
+            return;
+        }
+#endif
+    }
+
     uint8_t savedPlayerInFocus = *hooks.m_pPlayerInFocus;
     if (playerSlot > 0)
     {

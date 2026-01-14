@@ -82,6 +82,19 @@ void WriteCameraOrientationPlaceholder(NetBitStream& bs, float camRotation)
     WriteFloatAsBits(bs, 3, -4.0f, 4.0f, 0.0f, false);
     WriteFloatAsBits(bs, 3, -4.0f, 4.0f, 0.0f, false);
 }
+
+bool ShouldDispatchDuringJoin(uint8_t packetId)
+{
+    switch (static_cast<PacketID>(packetId))
+    {
+        case PacketID::PLAYER_LIST:
+        case PacketID::PLAYER_JOIN:
+        case PacketID::PLAYER_SPAWN:
+            return true;
+        default:
+            return false;
+    }
+}
 } // namespace
 
 //=============================================================================
@@ -752,10 +765,32 @@ void CServerConnection::ProcessWaitJoinComplete()
         {
             m_lastPacketTime = GetCurrentTimeMs();
 
-            if (buffer[0] == PACKET_ID_SERVER_JOIN_COMPLETE)
+            uint8_t packetId = buffer[0];
+            if (packetId == PACKET_ID_SERVER_JOIN_COMPLETE)
             {
                 NetBitStream bitStream(buffer + 1, received - 1);
                 HandleJoinCompletePacket(bitStream);
+            }
+            else if (packetId == PACKET_ID_SERVER_JOINEDGAME)
+            {
+                LOGD("WAIT_JOIN_COMPLETE: received JOINED_GAME early");
+                NetBitStream bitStream(buffer + 1, received - 1);
+                if (m_network && m_network->HasPacketHandler())
+                {
+                    m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                    bitStream.ResetReadPointer();
+                }
+                HandleJoinedGamePacket(bitStream);
+            }
+            else if (ShouldDispatchDuringJoin(packetId) && m_network && m_network->HasPacketHandler())
+            {
+                LOGD("WAIT_JOIN_COMPLETE: dispatching packet 0x%02X (%zd bytes)", packetId, received);
+                NetBitStream bitStream(buffer + 1, received - 1);
+                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+            }
+            else
+            {
+                LOGD("WAIT_JOIN_COMPLETE: ignoring packet 0x%02X (%zd bytes)", packetId, received);
             }
         }
     }
@@ -782,10 +817,26 @@ void CServerConnection::ProcessWaitJoinedGame()
         {
             m_lastPacketTime = GetCurrentTimeMs();
 
-            if (buffer[0] == PACKET_ID_SERVER_JOINEDGAME)
+            uint8_t packetId = buffer[0];
+            if (packetId == PACKET_ID_SERVER_JOINEDGAME)
             {
                 NetBitStream bitStream(buffer + 1, received - 1);
+                if (m_network && m_network->HasPacketHandler())
+                {
+                    m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                    bitStream.ResetReadPointer();
+                }
                 HandleJoinedGamePacket(bitStream);
+            }
+            else if (ShouldDispatchDuringJoin(packetId) && m_network && m_network->HasPacketHandler())
+            {
+                LOGD("WAIT_JOINED_GAME: dispatching packet 0x%02X (%zd bytes)", packetId, received);
+                NetBitStream bitStream(buffer + 1, received - 1);
+                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+            }
+            else
+            {
+                LOGD("WAIT_JOINED_GAME: ignoring packet 0x%02X (%zd bytes)", packetId, received);
             }
         }
     }
@@ -813,19 +864,22 @@ void CServerConnection::ProcessConnected()
         {
             m_lastPacketTime = GetCurrentTimeMs();
             uint8_t packetId = buffer[0];
+            char fromIp[INET_ADDRSTRLEN] = {};
+            inet_ntop(AF_INET, &fromAddr.sin_addr, fromIp, sizeof(fromIp));
+            uint16_t fromPort = ntohs(fromAddr.sin_port);
 
             // Debug log for sync packets
             static int incomingCount = 0;
             if (packetId == 0x20)  // PLAYER_PURESYNC
             {
-                if (++incomingCount % 100 == 1)
+                if (++incomingCount <= 10)
                 {
-                    LOGD("Received PURESYNC from server (%zd bytes)", received);
+                    LOGD("Received PURESYNC from %s:%u (%zd bytes)", fromIp, fromPort, received);
                 }
             }
             else
             {
-                LOGD("Received packet 0x%02X from server (%zd bytes)", packetId, received);
+                LOGD("Received packet 0x%02X from %s:%u (%zd bytes)", packetId, fromIp, fromPort, received);
             }
 
             // Dispatch to packet handler if registered
@@ -1219,9 +1273,21 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
         return;
     }
 
+    if (m_playerId == 0)
+    {
+        return;  // Local player id not assigned yet
+    }
+
+    // Player ID (ElementID on the wire)
+    WriteElementId(*bitStream, static_cast<uint32_t>(m_playerId));
+
     // Sync context
     uint8_t syncTimeContext = static_cast<uint8_t>(GetCurrentTimeMs() & 0xFF);
     bitStream->Write(syncTimeContext);
+
+    // Latency (compressed)
+    uint16_t latency = 0;
+    bitStream->WriteCompressed(latency);
 
     // Controller state (derived from movement for now)
     SControllerState controller = BuildControllerFromVelocity(vx, vy, rotation);
@@ -1229,21 +1295,21 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
 
     // Player puresync flags (PC format)
     SPlayerPuresyncFlags flags;
-    flags.isOnGround = onGround;
-    flags.isInWater = false;
-    flags.hasJetPack = false;
-    flags.isDucked = false;
-    flags.wearsGoggles = false;
-    flags.hasContact = false;
-    flags.isChoking = false;
-    flags.akimboTargetUp = false;
-    flags.isOnFire = false;
-    flags.hasAWeapon = false;
-    flags.syncingVelocity = (vx != 0.0f || vy != 0.0f || vz != 0.0f);
-    flags.stealthAiming = false;
-    flags.isReloadingWeapon = false;
-    flags.animInterrupted = false;
-    flags.hangingDuringClimb = false;
+    flags.data.bIsOnGround = onGround;
+    flags.data.bIsInWater = false;
+    flags.data.bHasJetPack = false;
+    flags.data.bIsDucked = false;
+    flags.data.bWearsGoogles = false;
+    flags.data.bHasContact = false;
+    flags.data.bIsChoking = false;
+    flags.data.bAkimboTargetUp = false;
+    flags.data.bIsOnFire = false;
+    flags.data.bHasAWeapon = false;
+    flags.data.bSyncingVelocity = (vx != 0.0f || vy != 0.0f || vz != 0.0f);
+    flags.data.bStealthAiming = false;
+    flags.data.isReloadingWeapon = false;
+    flags.data.animInterrupted = false;
+    flags.data.hangingDuringClimb = false;
     flags.Write(*bitStream);
 
     // Position (PC compressed format)
@@ -1259,7 +1325,7 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     pedRot.Write(*bitStream);
 
     // Velocity (PC format)
-    if (flags.syncingVelocity)
+    if (flags.data.bSyncingVelocity)
     {
         SPcVelocitySync vel;
         vel.x = vx;
@@ -1276,9 +1342,6 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     SPcCameraRotationSync camRot;
     camRot.rotation = rotation;
     camRot.Write(*bitStream);
-
-    // Camera orientation block (placeholder)
-    WriteCameraOrientationPlaceholder(*bitStream, rotation);
 
     // Send packet directly via our socket (not through CNetAndroid which has a separate socket)
     if (m_socket >= 0)

@@ -727,3 +727,359 @@ Now that basic remote player rendering works:
 3. Add targeted logging for bit offsets and values to locate alignment break.
 
 ---
+
+## Session 23: Puresync Alignment Probes (January 14, 2026)
+
+**Current Issue:**
+- Remote players still not visible; puresync parsing remains misaligned.
+- Keysync bytes read as zero/invalid; flags decode to all false.
+- Position read fails validation; X/Y/Z values are nonsensical.
+
+**Changes Made (This Session):**
+1. Implemented strict keysync parsing (bit-by-bit, no struct memcpy).
+2. Added keysync debug logging (key bits, analog button bytes, stick bytes).
+3. Added MSB/LSB and MSB-significance probes for flags/position bits.
+4. Added PlayerID width probes (16/17/18-bit) to test alignment.
+
+**Findings:**
+- All PlayerID widths parse syntactically, but keysync bytes remain invalid in all cases.
+- Misalignment occurs before keysync (not just flags/position).
+
+**Next Steps:**
+1. Add a byte-skip probe (offset by 8 bits) to verify packet framing.
+2. Verify CNetAndroid payload framing (possible prefix/subheader in packet).
+3. Re-check latency/timeContext decode once framing is corrected.
+
+---
+
+## Session 24: Bitstream Framing Regression Confirmed (January 14, 2026)
+
+**Current Issue:**
+- Packet misparsing is systemic (PlayerSpawn, PlayerList, PURESYNC all decode garbage).
+- Player IDs decode as large values (e.g., 56k-61k); nickname length invalid (131).
+- PURESYNC keysync remains 0x00; positions still incorrect.
+
+**Changes Made (This Session):**
+1. Added raw payload + offset logging in PURESYNC handler.
+2. Removed forced 3-bit read offset in `CServerConnection` (no change in decode).
+3. Added 16-bit ElementID compat reader in packet handler.
+
+**Findings:**
+- ElementID width alone is not the root cause.
+- Bitstream framing/bit order mismatch affects multiple packet types, not just PURESYNC.
+- User confirmation: decoder reads junk across packet types, consistent with framing/bit-order issue.
+
+**Next Steps:**
+1. Compare Android NetBitStream bit order vs PC `bitstream.h::ReadBits`.
+2. Verify ElementID bitcount and endianness expectations vs server/deathmatch.
+3. Capture a raw payload and decode with PC bitstream to confirm expected fields.
+
+---
+
+## Session 25: Android Server Module Deployment + Crash (January 14, 2026)
+
+**Current Issue:**
+- VPS `dev` is running the Android network module by replacing `x64/net.so` with `net_android.so` (Android-only testing; PC clients cannot connect).
+- Server now crashes on startup (SIGSEGV) and does not stay running.
+
+**Changes Made (This Session):**
+1. Rebuilt `Server/net-android` and deployed as `/home/ubuntu/mtasa/dev/x64/net.so`.
+2. Rebuilt and reinstalled APK to both Genymotion devices (`install -r`).
+3. Collected server logs and gdb backtrace for the startup crash.
+4. Namespaced `CRefCountable`/`CCriticalSection` under `SharedUtil` to match deathmatch expectations, rebuilt, redeployed.
+
+**Findings:**
+- Crash occurs in `CNetBitStreamAndroid::Write(const ISyncStructure*)` during `CHqComms::Pulse()` before any client connects.
+- Suggests missing bitstream helper behavior expected by `deathmatch.so` (e.g., `WriteLength`/`WriteStr` or related helpers).
+- Server logs show normal startup and resource load errors, then crash.
+- After namespace alignment, the crash persists at the same location; last log line is `DoPulse: 1 calls, 0 clients, queue processing active`.
+
+**Next Steps:**
+1. Implement missing bitstream helpers in `CNetBitStreamAndroid` (`WriteLength`, `ReadLength`, `WriteStr`, `ReadStr`) to match `Shared/sdk/net/bitstream.h`.
+2. Rebuild and verify server stays up on `dev`.
+3. Resume Android join/sync tests once server is stable (Android-only server).
+
+---
+
+## Session 26: NetBitStream ABI Fix - Server Stable (January 14, 2026)
+
+**Current Issue:**
+- VPS server crashed on startup with `net_android.so` in `CHqComms::Pulse()` during `CNetBitStreamAndroid::Write(const ISyncStructure*)`.
+- Crash reproduced under gdb; backtrace indicated a vtable slot mismatch (ABI issue).
+
+**Findings:**
+- `syncStruct` pointer in the crash matched ASCII `"1.6.0-9.23183.0"`, implying `Write(const char* input, int numberOfBytes)` was dispatching to the wrong virtual slot.
+- Root cause: `NetBitStreamInterface` virtual method order did not match the MTA 1.6 server binary vtable layout.
+
+**Fix Applied (VPS + Repo):**
+1. Reordered `NetBitStreamInterface` virtuals in `CNetBitStreamAndroid.h`:
+   - `Write(const ISyncStructure*)` now comes **before** `Write(const char*, int)`.
+   - `Read(ISyncStructure*)` now comes **before** `Read(char*, int)`.
+2. Rebuilt `net_android.so` (RelWithDebInfo) and deployed to `/home/ubuntu/mtasa/dev/x64/net.so`.
+3. Server now stays up on startup (verified with `timeout 8s ./mta-server64`).
+
+**ABI Parity Updates:**
+- Updated `CNetServerAndroid.h` to match server expectations:
+  - Added `SScriptInfo` and `SPlayerPacketUsage` structs.
+  - Updated `GetScriptInfo()` and `GetPlayerPacketUsageStats()` signatures.
+- Added `SyncPacketID` namespace and method declarations required by VPS-only bypass logic.
+
+**Note:**
+- VPS `CNetServerAndroid.cpp` contains additional bypass functions (`SendPlayerSpawn`, `NotifyPlayerJoined`, `SendExistingPlayersTo`) not present in the local repo; header declarations were added for build parity. Consider syncing VPS CPP changes if needed.
+
+**Next Steps:**
+1. Implement missing bitstream helpers in `CNetBitStreamAndroid` (WriteLength/ReadLength/WriteStr/ReadStr/CanReadNumberOfBytes) to match `Shared/sdk/net/bitstream.h`.
+2. Build a small bitstream compatibility harness to compare Android vs PC bit offsets.
+3. Resume Android join/sync tests once server stability is confirmed and bitstream framing is aligned.
+
+---
+
+*Document updated: January 14, 2026 - Session 26: NetBitStream ABI Fix*
+
+---
+
+## Session 27: Bitstream Helpers + Harness + Packet Dumps (January 14, 2026)
+
+**Current Issue:**
+- Bitstream framing regression remains (PlayerList/PlayerSpawn/PURESYNC misparsed on Android).
+- Need raw payload dumps to align Android decode with PC bitstream layout.
+
+**Changes Made (This Session):**
+1. Aligned net-android bitstream helper semantics to `Shared/sdk/net/bitstream.h`:
+   - Implemented `WriteLength`, `ReadLength`, `WriteStr`, `ReadStr`.
+   - Updated `CanReadNumberOfBytes` rounding behavior.
+2. Added a tiny compatibility harness (`bitstream_harness.cpp`) and CMake option:
+   - `NET_ANDROID_BUILD_HARNESS=ON` builds `bitstream_harness`.
+   - Local run: all tests PASS (WriteLength/ReadLength/WriteStr/ReadStr + bit order).
+3. Added env-gated full packet dumps in `CNetServerAndroid::LogPacket`:
+   - `MTA_ANDROID_DUMP_PACKETS=1` prints full hex for PlayerList/Spawn/Pure/Key/VehiclePure/Light.
+4. Rebuilt and deployed `net_android.so` on VPS; server stays up.
+
+**Current State:**
+- Server stable with new helpers.
+- Packet dumps ready, but no Android client payload captured yet.
+
+**Next Steps:**
+1. Run server with `MTA_ANDROID_DUMP_PACKETS=1` and connect two Android clients.
+2. Capture full hex payloads for PlayerList/Spawn/PURESYNC/KEYSYNC.
+3. Decode the same payload with PC bitstream to identify framing/bit-order mismatch.
+
+---
+
+*Document updated: January 14, 2026 - Session 27: Bitstream Helpers + Harness + Packet Dumps*
+
+---
+
+## Session 28: Two-Client Connect + Packet Capture (January 14, 2026)
+
+**Goal:** Connect two Android clients, capture real packet payloads for framing analysis.
+
+**Server Observations:**
+- Both clients completed handshake and JOINDATA (96 bytes) received.
+- `JOIN_COMPLETE` and `JOINED_GAME` sent to both clients.
+- `PLAYER_SPAWN` sent (packet `0x1A`, 23 bytes):
+  - To :50028: `1a 6c c3 00 00 fe 88 1b 45 a6 5b d0 c4 00 00 58 41 00 00 00 00 00 00`
+  - To :53820: `1a 3c d2 00 00 fe 88 1b 45 a6 5b d0 c4 00 00 58 41 00 00 00 00 00 00`
+- `PLAYER_LIST` sent (packet `0x19`, 12 bytes):
+  - To :50028: `19 01 2f ee 07 41 6e 64 72 6f 69 64`
+  - To :53820: `19 01 2f ee 07 41 6e 64 72 6f 69 64`
+- Continuous `PURESYNC` received from both clients (packet `0x20`, 27 bytes), example:
+  - `20 9c 00 00 00 08 10 80 c4 4d 16 e9 cb bd 05 9c 82 fe ff 90 01 00 20 20 20 48 02`
+- Server timed out both clients shortly after join; subsequent sync packets logged with `Client state: 0`.
+
+**Client Observations:**
+- Both devices in-game and sending `PURESYNC` (27 bytes).
+- `SYNC: Remote players: 0` persists; no evidence of PlayerList/Spawn parsing.
+
+**Current State:**
+- Packet capture successful.
+- Framing regression still present (PlayerList/Spawn/PURESYNC not parsed on Android).
+- Timeout likely triggered because client is not recognized/updated after join.
+
+**Next Steps:**
+1. Decode captured payloads with PC bitstream to locate exact misalignment.
+2. Verify client packet read order vs server write order for PlayerList/Spawn/PURESYNC.
+3. Consider updating timeout logic so any incoming sync updates lastPacketTime during framing debug.
+
+---
+
+## Session 29: Two-Client Live Sync Relay (January 14, 2026)
+
+**Goal:** Verify live two-client sync relay after server restart and observe remote player creation.
+
+**Server Observations:**
+- Server restarted in detached `screen` with `MTA_ANDROID_DUMP_PACKETS=1`; log file `/tmp/mta-server.log`.
+- Continuous inbound `0x20` (PlayerPureSync) from both client ports.
+- net-android logs show `SYNC BYPASS: Broadcasting packet 0x20 to other clients` repeatedly.
+- No `PlayerJoin`/`PlayerSpawn` lines in recent log tail (may be out of window).
+- `mods/deathmatch/logs/server.log` shows startup/resource errors only.
+
+**Client Observations:**
+- Both devices reach game state 9 (spawned) and send PURESYNC (27 bytes).
+- Both report `SYNC: Remote players: 0`.
+- Repeated warnings: `MTA-CPad ProcessControl: remote ped ... missing state`.
+
+**Current State:**
+- Server relays PURESYNC between clients, but clients do not register remote players.
+- Join/spawn packets are either missing, not logged, or still misparsed.
+
+**Next Steps:**
+1. Clear logcat and capture from fresh reconnect to confirm `PlayerJoin`/`PlayerSpawn` arrivals (packet IDs 0x03/0x1A).
+2. Add explicit server logging around `SendPlayerJoin`/`SendPlayerSpawn` to confirm emission and payload sizes.
+3. Decode join/spawn payloads on the client and match bit offsets against expected layout.
+
+---
+
+## Session 30: Join/Spawn Parsing Confirmed + Local ID Gap (January 14, 2026)
+
+**Goal:** Confirm join/spawn parsing with clean logcat and identify remaining remote ped blockers.
+
+**Changes Made (This Session):**
+1. Added detailed `PLAYER_JOIN` and `PLAYER_SPAWN` decode logging in `Client/android/network/CPacketHandler.cpp` (offsets, hex preview, parsed fields).
+2. Forwarded join-phase packets during handshake in `Client/android/network/CServerConnection.cpp` (dispatch join/spawn while waiting for JOIN_COMPLETE/JOINED_GAME).
+3. Rebuilt `libmta_android.so`, repackaged APK, installed to both Genymotion devices.
+
+**Client Observations:**
+- Both devices received and parsed:
+  - `PLAYER_JOIN` with nickname "Android" and IDs ~57245/64533.
+  - `PLAYER_SPAWN` with correct spawn position (2488.6, -1666.9, 13.5), skin 0.
+- JOIN_COMPLETE and JOINED_GAME received via connection state machine.
+- PURESYNC processed continuously.
+- Repeated warnings: `MTA-CPad ProcessControl: remote ped ... missing state`.
+
+**Current State:**
+- Join/spawn parsing is correct.
+- Remote players still invisible due to missing ped state and local ID not propagated into `CPacketHandler`.
+- Player manager logs show `UpdatePlayerSync` firing, but `localId=0`.
+
+**Next Steps:**
+1. Dispatch SERVER_JOINEDGAME into `CPacketHandler` (or propagate local player ID) so `SetLocalPlayerId` and InitialDataStream RPC fire.
+2. Reduce game state spam to surface remote ped creation logs (PedFactory/CWorldPlayers).
+3. Verify remote ped initialization (m_pIntelligence / m_pPlayerData) and fix CPad "missing state" warnings.
+
+---
+
+*Document updated: January 14, 2026 - Session 30: Join/Spawn Parsing Confirmed + Local ID Gap*
+
+---
+
+## Session 31: JOINED_GAME Fix + PURESYNC Layout Update (January 14, 2026)
+
+**Goal:** Fix local player ID propagation and align outgoing PURESYNC layout to PC format.
+
+**Changes Made (This Session):**
+1. Fixed `JOINED_GAME` parsing in `Client/android/network/CPacketHandler.cpp` (uint16 playerId + count + root) so localId is set correctly.
+2. Updated `Client/android/network/CServerConnection.cpp` PURESYNC writer to include ElementID + compressed latency and removed the camera placeholder.
+3. Rebuilt `libmta_android.so`, repackaged APK, installed to both Genymotion devices.
+
+**Client Observations:**
+- Local player ID now correct (`localId=1`), game state reaches 9.
+- PURESYNC parsing still applies a 1-bit framing offset; latencies decode as huge values.
+- Remote peds exist but `CPad` logs show `missing state` (m_pIntelligence = 0), so they remain invisible.
+- RemotePlayer dump confirms `m_pPlayerData` nonzero but `m_pIntelligence` null.
+
+**Server Observations:**
+- Server log shows only resource/script errors; no crashes.
+
+**Current State:**
+- Local ID propagation fixed.
+- PURESYNC still misaligned (1-bit framing offset) and remote ped intelligence missing.
+
+**Next Steps:**
+1. Capture and compare raw PURESYNC payloads (server relay vs client parse) to remove the 1-bit framing offset.
+2. Initialize remote ped intelligence (or ensure slot-based creation path sets m_pIntelligence) to stop CPad skipping.
+
+---
+
+*Document updated: January 14, 2026 - Session 31: JOINED_GAME Fix + PURESYNC Layout Update*
+
+---
+
+## Session 32: Sync Bypass Fix + CPad Intelligence Offset Probe (January 14, 2026)
+
+**Goal:** Resolve remote ped visibility after PURESYNC alignment.
+
+**Changes Made (This Session):**
+1. Server: updated net-android sync bypass to relay raw sync packets (removed duplicate ElementID prepend).
+2. Client: added ProcessControl offset logging (0x590/0x598/0x5A0/0x5A8) for first 10 calls.
+3. Client: updated remote ped guard to accept alternate intelligence offset at `0x5A8` (logs int + alt + pdata).
+
+**Client Observations:**
+- PURESYNC now aligns at offset 0; playerId and latency decode correctly.
+- Remote peds still skipped with old guard; logs show `0x5A8` and `0x5A0` non-zero while `0x598` is zero/garbage.
+
+**Current State:**
+- Server relays raw sync payloads correctly (framing regression resolved on relay path).
+- Remote peds still invisible until CPad guard uses the `0x5A8` intelligence pointer (patch pending rebuild/deploy).
+
+**Next Steps:**
+1. Rebuild APK with updated guard and deploy to devices.
+2. Confirm remote ped ProcessControl no longer skips and visibility returns.
+3. Remove temporary ProcessControl offset logging once validated.
+
+---
+
+*Document updated: January 14, 2026 - Session 32: Sync Bypass Fix + CPad Intelligence Offset Probe*
+
+---
+
+## Session 33: PURESYNC Receive Confirmed + CPad Offset Expansion (January 14, 2026)
+
+**Goal:** Confirm inbound PURESYNC delivery and validate remote ped intelligence offsets on GTA:SA v2.10.
+
+**Changes Made (This Session):**
+1. Client: added CPadHooks ProcessControl probe for 0x538 and expanded guard to accept 0x538/0x598/0x5A8.
+2. Client: expanded CRemotePlayer debug dump + EnsureIntelligence to include 0x538/0x540 offsets and set `SYNC_TIMEOUT_MS=15000` for debug.
+3. Client: added inbound packet source logging + first-10 PURESYNC logs in `CServerConnection`.
+4. Rebuilt and deployed APK to both devices.
+5. Verified GTA:SA base APK and injected APK are both v2.10 (versionCode 34).
+
+**Client Observations:**
+- PURESYNC now logs as received from server (source IP/port).
+- Packet ID 32 processed; decoded playerId consistently `1`.
+- Join/spawn parsing still reports large player IDs (54k-59k range).
+- Remote ped memory shows `m_pIntelligence` at `0x538`/`0x5A8` (0x598 remains zero).
+
+**Current State:**
+- Sync data arrives and is parsed, but does not map to an existing remote player.
+- ID mismatch persists between join/spawn IDs and PURESYNC playerId, leaving "Remote players: 0" and invisible players.
+
+**Next Steps:**
+1. Instrument `Packet_PlayerPureSync` to log playerId and lookup results in `CPlayerManager`.
+2. Align ElementID decoding/mapping between join/spawn and PURESYNC (bit width or translation) so updates hit the correct remote player.
+3. Remove temporary PURESYNC/offset logs once remote visibility returns.
+
+---
+
+*Document updated: January 14, 2026 - Session 33: PURESYNC Receive Confirmed + CPad Offset Expansion*
+
+---
+
+## Session 34: Sync Bypass ElementID Prepend + Relay Validation (January 14, 2026)
+
+**Goal:** Ensure relayed sync packets carry the sender ElementID so clients can map PURESYNC to the correct remote player.
+
+**Changes Made (This Session):**
+1. Server: cache sender ElementID from `SERVER_JOINEDGAME` and prepend it (17-bit) to relayed sync payloads.
+2. Server: rebuilt net_android and restarted the VPS server.
+
+**Client Observations (logcat excerpts):**
+- PURESYNC still decodes `playerId=1` on both devices (packet bytes start with `01 00 ...`).
+- `SYNC: Remote players: 0` continues to repeat; remote players still invisible.
+- CPad offset probes show `m_pIntelligence` present at `0x538`/`0x5A8`, `0x598` remains zero.
+
+**Server Observations:**
+- Server log shows JOINDATA for one client after restart; no SYNC BYPASS or cached ElementID lines seen yet.
+
+**Current State:**
+- Sync bypass ElementID prepend is deployed, but current logs still show `playerId=1` and zero remote players.
+- Join/spawn IDs were not captured in the latest excerpts, so ID mapping is not yet verified post-change.
+
+**Next Steps:**
+1. Clear device logs, reconnect both clients, and capture fresh PLAYER_JOIN/PLAYER_SPAWN + PURESYNC to verify ElementID mapping.
+2. Add temporary server log for cached ElementID and per-relay ElementID to confirm the new path is active.
+3. If IDs still mismatch, instrument `UpdatePlayerSync` lookup and ensure remote player creation uses the same ElementID.
+
+---
+
+*Document updated: January 14, 2026 - Session 34: Sync Bypass ElementID Prepend + Relay Validation*

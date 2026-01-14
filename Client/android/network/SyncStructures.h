@@ -51,78 +51,44 @@ inline float ClampFloat(float value, float min, float max)
 
 struct SPlayerPuresyncFlags
 {
-    bool isInWater : 1;
-    bool isOnGround : 1;
-    bool hasJetPack : 1;
-    bool isDucked : 1;
-    bool wearsGoggles : 1;
-    bool hasContact : 1;
-    bool isChoking : 1;
-    bool akimboTargetUp : 1;
-    bool isOnFire : 1;
-    bool hasAWeapon : 1;
-    bool syncingVelocity : 1;
-    bool stealthAiming : 1;
-    bool isReloadingWeapon : 1;
-    bool animInterrupted : 1;
-    bool hangingDuringClimb : 1;
+    enum
+    {
+        BITCOUNT = 15
+    };
+
+    struct
+    {
+        bool bIsInWater : 1;
+        bool bIsOnGround : 1;
+        bool bHasJetPack : 1;
+        bool bIsDucked : 1;
+        bool bWearsGoogles : 1;
+        bool bHasContact : 1;
+        bool bIsChoking : 1;
+        bool bAkimboTargetUp : 1;
+        bool bIsOnFire : 1;
+        bool bHasAWeapon : 1;
+        bool bSyncingVelocity : 1;
+        bool bStealthAiming : 1;
+        bool isReloadingWeapon : 1;
+        bool animInterrupted : 1;
+        bool hangingDuringClimb : 1;
+    } data;
 
     SPlayerPuresyncFlags()
     {
-        isInWater = false;
-        isOnGround = true;
-        hasJetPack = false;
-        isDucked = false;
-        wearsGoggles = false;
-        hasContact = false;
-        isChoking = false;
-        akimboTargetUp = false;
-        isOnFire = false;
-        hasAWeapon = false;
-        syncingVelocity = false;
-        stealthAiming = false;
-        isReloadingWeapon = false;
-        animInterrupted = false;
-        hangingDuringClimb = false;
+        std::memset(&data, 0, sizeof(data));
+        data.bIsOnGround = true;
     }
 
     void Write(NetBitStream& bs) const
     {
-        bs.WriteBit(isInWater);
-        bs.WriteBit(isOnGround);
-        bs.WriteBit(hasJetPack);
-        bs.WriteBit(isDucked);
-        bs.WriteBit(wearsGoggles);
-        bs.WriteBit(hasContact);
-        bs.WriteBit(isChoking);
-        bs.WriteBit(akimboTargetUp);
-        bs.WriteBit(isOnFire);
-        bs.WriteBit(hasAWeapon);
-        bs.WriteBit(syncingVelocity);
-        bs.WriteBit(stealthAiming);
-        bs.WriteBit(isReloadingWeapon);
-        bs.WriteBit(animInterrupted);
-        bs.WriteBit(hangingDuringClimb);
+        bs.WriteBits(reinterpret_cast<const uint8_t*>(&data), BITCOUNT);
     }
 
     bool Read(NetBitStream& bs)
     {
-        isInWater = bs.ReadBit();
-        isOnGround = bs.ReadBit();
-        hasJetPack = bs.ReadBit();
-        isDucked = bs.ReadBit();
-        wearsGoggles = bs.ReadBit();
-        hasContact = bs.ReadBit();
-        isChoking = bs.ReadBit();
-        akimboTargetUp = bs.ReadBit();
-        isOnFire = bs.ReadBit();
-        hasAWeapon = bs.ReadBit();
-        syncingVelocity = bs.ReadBit();
-        stealthAiming = bs.ReadBit();
-        isReloadingWeapon = bs.ReadBit();
-        animInterrupted = bs.ReadBit();
-        hangingDuringClimb = bs.ReadBit();
-        return true;
+        return bs.ReadBits(reinterpret_cast<uint8_t*>(&data), BITCOUNT);
     }
 };
 
@@ -334,6 +300,47 @@ inline void WriteBitsFromUInt(NetBitStream& bs, uint32_t value, size_t bits)
     bs.WriteBits(reinterpret_cast<const uint8_t*>(&value), bits);
 }
 
+template <unsigned int integerBits, unsigned int fractionalBits>
+struct SFloatSync
+{
+    bool Read(NetBitStream& bs)
+    {
+        SFixedPointNumber num{};
+        if (bs.ReadBits(reinterpret_cast<uint8_t*>(&num), integerBits + fractionalBits))
+        {
+            data.fValue = static_cast<float>(static_cast<double>(num.iValue) / (1 << fractionalBits));
+            return true;
+        }
+        return false;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        const double limitsMax = (1 << (integerBits - 1)) - 1;
+        const double limitsMin = 0 - (1 << (integerBits - 1));
+        const double scale = 1 << fractionalBits;
+
+        double dValue = data.fValue;
+        if (dValue < limitsMin) dValue = limitsMin;
+        if (dValue > limitsMax) dValue = limitsMax;
+
+        SFixedPointNumber num{};
+        num.iValue = static_cast<int>(std::lround(dValue * scale));
+        bs.WriteBits(reinterpret_cast<const uint8_t*>(&num), integerBits + fractionalBits);
+    }
+
+    struct
+    {
+        float fValue = 0.0f;
+    } data;
+
+private:
+    struct SFixedPointNumber
+    {
+        int iValue : integerBits + fractionalBits;
+    };
+};
+
 inline bool ReadFixedPoint(NetBitStream& bs, int totalBits, int fracBits, float& outValue)
 {
     uint32_t raw = 0;
@@ -438,9 +445,13 @@ struct SPcPositionSync
         }
         else
         {
-            if (!ReadFixedPoint(bs, 24, 10, x)) return false;
-            if (!ReadFixedPoint(bs, 24, 10, y)) return false;
+            SFloatSync<14, 10> sx;
+            SFloatSync<14, 10> sy;
+            if (!sx.Read(bs)) return false;
+            if (!sy.Read(bs)) return false;
             if (!bs.Read(z)) return false;
+            x = sx.data.fValue;
+            y = sy.data.fValue;
         }
 
         return (x > -SYNC_POSITION_LIMIT && x < SYNC_POSITION_LIMIT &&
@@ -462,12 +473,47 @@ struct SPcPositionSync
         }
         else
         {
-            WriteFixedPoint(bs, 24, 10, cx);
-            WriteFixedPoint(bs, 24, 10, cy);
+            SFloatSync<14, 10> sx;
+            SFloatSync<14, 10> sy;
+            sx.data.fValue = cx;
+            sy.data.fValue = cy;
+            sx.Write(bs);
+            sy.Write(bs);
             bs.Write(cz);
         }
     }
 };
+
+inline bool ReadCameraOrientation(NetBitStream& bs)
+{
+    (void)ReadFloatAsBits(bs, 8, -PI, PI);
+    (void)ReadFloatAsBits(bs, 8, -PI, PI);
+
+    bool useAbsolute = bs.ReadBit();
+    (void)useAbsolute;
+
+    uint32_t idx = 0;
+    if (!ReadBitsToUInt(bs, idx, 2)) return false;
+
+    struct
+    {
+        uint32_t bits;
+        float range;
+    } table[4] = {
+        {3, 4.0f},
+        {5, 16.0f},
+        {9, 256.0f},
+        {14, 8192.0f},
+    };
+
+    const uint32_t bits = table[idx].bits;
+    const float range = table[idx].range;
+
+    (void)ReadFloatAsBits(bs, static_cast<int>(bits), -range, range);
+    (void)ReadFloatAsBits(bs, static_cast<int>(bits), -range, range);
+    (void)ReadFloatAsBits(bs, static_cast<int>(bits), -range, range);
+    return true;
+}
 
 struct SPcPedRotationSync
 {
@@ -569,7 +615,14 @@ struct SFullKeysyncSync
     {
         uint8_t keyBits = 0;
         if (!bs.ReadBits(&keyBits, 8)) return false;
-        std::memcpy(&data, &keyBits, 1);
+        data.bLeftShoulder1 = (keyBits & (1u << 0)) != 0;
+        data.bRightShoulder1 = (keyBits & (1u << 1)) != 0;
+        data.bButtonSquare = (keyBits & (1u << 2)) != 0;
+        data.bButtonCross = (keyBits & (1u << 3)) != 0;
+        data.bButtonCircle = (keyBits & (1u << 4)) != 0;
+        data.bButtonTriangle = (keyBits & (1u << 5)) != 0;
+        data.bShockButtonL = (keyBits & (1u << 6)) != 0;
+        data.bPedWalk = (keyBits & (1u << 7)) != 0;
 
         if (bs.ReadBit())
         {
@@ -602,7 +655,14 @@ struct SFullKeysyncSync
     void Write(NetBitStream& bs) const
     {
         uint8_t keyBits = 0;
-        std::memcpy(&keyBits, &data, 1);
+        keyBits |= data.bLeftShoulder1 ? (1u << 0) : 0;
+        keyBits |= data.bRightShoulder1 ? (1u << 1) : 0;
+        keyBits |= data.bButtonSquare ? (1u << 2) : 0;
+        keyBits |= data.bButtonCross ? (1u << 3) : 0;
+        keyBits |= data.bButtonCircle ? (1u << 4) : 0;
+        keyBits |= data.bButtonTriangle ? (1u << 5) : 0;
+        keyBits |= data.bShockButtonL ? (1u << 6) : 0;
+        keyBits |= data.bPedWalk ? (1u << 7) : 0;
         bs.WriteBits(&keyBits, 8);
 
         if (data.ucButtonSquare >= 1 && data.ucButtonSquare <= 254)
@@ -632,18 +692,62 @@ struct SFullKeysyncSync
     }
 };
 
-inline bool ReadFullKeysync(SControllerState& controller, NetBitStream& bs)
+struct SFullKeysyncDebug
+{
+    uint8_t keyBits = 0;
+    bool hasButtonSquare = false;
+    bool hasButtonCross = false;
+    uint8_t buttonSquare = 0;
+    uint8_t buttonCross = 0;
+    int8_t leftX = 0;
+    int8_t leftY = 0;
+};
+
+inline bool ReadFullKeysync(SControllerState& controller, NetBitStream& bs, SFullKeysyncDebug* debug = nullptr)
 {
     SFullKeysyncSync keys;
-    if (!keys.Read(bs)) return false;
+    uint8_t keyBits = 0;
+    if (!bs.ReadBits(&keyBits, 8)) return false;
+    keys.data.bLeftShoulder1 = (keyBits & (1u << 0)) != 0;
+    keys.data.bRightShoulder1 = (keyBits & (1u << 1)) != 0;
+    keys.data.bButtonSquare = (keyBits & (1u << 2)) != 0;
+    keys.data.bButtonCross = (keyBits & (1u << 3)) != 0;
+    keys.data.bButtonCircle = (keyBits & (1u << 4)) != 0;
+    keys.data.bButtonTriangle = (keyBits & (1u << 5)) != 0;
+    keys.data.bShockButtonL = (keyBits & (1u << 6)) != 0;
+    keys.data.bPedWalk = (keyBits & (1u << 7)) != 0;
 
     short sButtonSquare = keys.data.bButtonSquare ? 255 : 0;
     short sButtonCross = keys.data.bButtonCross ? 255 : 0;
 
-    if (keys.data.ucButtonSquare != 0)
+    bool hasButtonSquare = bs.ReadBit();
+    if (hasButtonSquare)
+    {
+        if (!bs.Read(keys.data.ucButtonSquare)) return false;
         sButtonSquare = static_cast<short>(keys.data.ucButtonSquare);
-    if (keys.data.ucButtonCross != 0)
+    }
+    else
+    {
+        keys.data.ucButtonSquare = 0;
+    }
+
+    bool hasButtonCross = bs.ReadBit();
+    if (hasButtonCross)
+    {
+        if (!bs.Read(keys.data.ucButtonCross)) return false;
         sButtonCross = static_cast<short>(keys.data.ucButtonCross);
+    }
+    else
+    {
+        keys.data.ucButtonCross = 0;
+    }
+
+    int8_t leftX = 0;
+    int8_t leftY = 0;
+    if (!bs.Read(leftX)) return false;
+    if (!bs.Read(leftY)) return false;
+    keys.data.sLeftStickX = static_cast<short>(static_cast<float>(leftX) * 128.0f / 127.0f);
+    keys.data.sLeftStickY = static_cast<short>(static_cast<float>(leftY) * 128.0f / 127.0f);
 
     controller.LeftShoulder1 = keys.data.bLeftShoulder1;
     controller.RightShoulder1 = keys.data.bRightShoulder1;
@@ -655,6 +759,17 @@ inline bool ReadFullKeysync(SControllerState& controller, NetBitStream& bs)
     controller.m_bPedWalk = keys.data.bPedWalk;
     controller.LeftStickX = keys.data.sLeftStickX;
     controller.LeftStickY = keys.data.sLeftStickY;
+
+    if (debug)
+    {
+        debug->keyBits = keyBits;
+        debug->hasButtonSquare = hasButtonSquare;
+        debug->hasButtonCross = hasButtonCross;
+        debug->buttonSquare = keys.data.ucButtonSquare;
+        debug->buttonCross = keys.data.ucButtonCross;
+        debug->leftX = leftX;
+        debug->leftY = leftY;
+    }
     return true;
 }
 
@@ -944,7 +1059,7 @@ struct SPlayerPuresyncData
         position.Write(bs);
         rotation.Write(bs);
 
-        if (flags.syncingVelocity)
+        if (flags.data.bSyncingVelocity)
         {
             velocity.Write(bs);
         }
@@ -956,7 +1071,7 @@ struct SPlayerPuresyncData
         SRotationSync camRot(cameraRotation);
         camRot.Write(bs);
 
-        if (flags.hasAWeapon)
+        if (flags.data.bHasAWeapon)
         {
             weaponSlot.Write(bs);
             ammo.Write(bs);
@@ -970,7 +1085,7 @@ struct SPlayerPuresyncData
         if (!position.Read(bs)) return false;
         if (!rotation.Read(bs)) return false;
 
-        if (flags.syncingVelocity)
+        if (flags.data.bSyncingVelocity)
         {
             if (!velocity.Read(bs)) return false;
         }
@@ -982,7 +1097,7 @@ struct SPlayerPuresyncData
         if (!camRot.Read(bs)) return false;
         cameraRotation = camRot.rotation;
 
-        if (flags.hasAWeapon)
+        if (flags.data.bHasAWeapon)
         {
             if (!weaponSlot.Read(bs)) return false;
             if (!ammo.Read(bs)) return false;

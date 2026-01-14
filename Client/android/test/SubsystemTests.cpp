@@ -888,10 +888,10 @@ TestResult Test_SyncStructures_PlayerFlags()
     NetBitStream bs;
 
     SPlayerPuresyncFlags flagsWrite;
-    flagsWrite.isOnGround = true;
-    flagsWrite.isDucked = true;
-    flagsWrite.hasAWeapon = true;
-    flagsWrite.syncingVelocity = true;
+    flagsWrite.data.bIsOnGround = true;
+    flagsWrite.data.bIsDucked = true;
+    flagsWrite.data.bHasAWeapon = true;
+    flagsWrite.data.bSyncingVelocity = true;
 
     flagsWrite.Write(bs);
 
@@ -900,11 +900,11 @@ TestResult Test_SyncStructures_PlayerFlags()
     SPlayerPuresyncFlags flagsRead;
     ASSERT_TRUE(flagsRead.Read(bs), "Failed to read flags");
 
-    ASSERT_TRUE(flagsRead.isOnGround == true, "isOnGround mismatch");
-    ASSERT_TRUE(flagsRead.isDucked == true, "isDucked mismatch");
-    ASSERT_TRUE(flagsRead.hasAWeapon == true, "hasAWeapon mismatch");
-    ASSERT_TRUE(flagsRead.syncingVelocity == true, "syncingVelocity mismatch");
-    ASSERT_TRUE(flagsRead.isInWater == false, "isInWater should be false");
+    ASSERT_TRUE(flagsRead.data.bIsOnGround == true, "isOnGround mismatch");
+    ASSERT_TRUE(flagsRead.data.bIsDucked == true, "isDucked mismatch");
+    ASSERT_TRUE(flagsRead.data.bHasAWeapon == true, "hasAWeapon mismatch");
+    ASSERT_TRUE(flagsRead.data.bSyncingVelocity == true, "syncingVelocity mismatch");
+    ASSERT_TRUE(flagsRead.data.bIsInWater == false, "isInWater should be false");
 
     TEST_LOG("  Player flags: OK");
     return TestPass();

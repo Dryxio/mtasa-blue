@@ -19,6 +19,8 @@
 // Forward declare ISyncStructure
 struct ISyncStructure;
 
+namespace SharedUtil
+{
 //=============================================================================
 // CCriticalSection - Thread synchronization primitive
 // MUST match MTA's CCriticalSection memory layout and behavior!
@@ -100,6 +102,16 @@ public:
         return newCount;
     }
 };
+} // namespace SharedUtil
+
+using namespace SharedUtil;
+
+// Compatibility shim for older net-android headers.
+class CRefCountableSimple : public CRefCountable
+{
+protected:
+    virtual ~CRefCountableSimple() {}
+};
 
 //=============================================================================
 // NetBitStreamInterface - Simplified version for server
@@ -122,8 +134,10 @@ public:
     virtual void Write(const int& input) = 0;
     virtual void Write(const float& input) = 0;
     virtual void Write(const double& input) = 0;
-    virtual void Write(const char* input, int numberOfBytes) = 0;
+    // NOTE: Order matches the MTA server binary vtable layout (1.6 release).
+    // Swapped relative to newer headers to avoid WriteStr calling the wrong slot.
     virtual void Write(const ISyncStructure* syncStruct) = 0;
+    virtual void Write(const char* input, int numberOfBytes) = 0;
 
     virtual void WriteCompressed(const unsigned char& input) = 0;
     virtual void WriteCompressed(const char& input) = 0;
@@ -151,8 +165,8 @@ public:
     virtual bool Read(int& output) = 0;
     virtual bool Read(float& output) = 0;
     virtual bool Read(double& output) = 0;
-    virtual bool Read(char* output, int numberOfBytes) = 0;
     virtual bool Read(ISyncStructure* syncStruct) = 0;
+    virtual bool Read(char* output, int numberOfBytes) = 0;
 
     virtual bool ReadCompressed(unsigned char& output) = 0;
     virtual bool ReadCompressed(char& output) = 0;
@@ -188,9 +202,33 @@ public:
     //=========================================================================
 
     // Check if we can read N bytes
-    bool CanReadNumberOfBytes(unsigned int uiLength) const
+    bool CanReadNumberOfBytes(int iLength) const
     {
-        return (GetNumberOfUnreadBits() >= (int)(uiLength * 8));
+        return iLength >= 0 && iLength <= (GetNumberOfUnreadBits() + 7) / 8;
+    }
+
+    // Write string characters (no length prefix)
+    void WriteStringCharacters(const std::string& value, unsigned int uiLength)
+    {
+        if (uiLength > 0 && uiLength <= value.length())
+            Write(value.c_str(), uiLength);
+    }
+
+    // Write a string with ushort length prefix
+    template <typename SizeType = unsigned short>
+    void WriteString(const std::string& value)
+    {
+        SizeType length = static_cast<SizeType>(value.length());
+        Write(length);
+        if (length > 0)
+            Write(value.c_str(), length);
+    }
+
+    // Write a string (incl. variable size header)
+    void WriteStr(const std::string& value)
+    {
+        WriteLength(static_cast<unsigned int>(value.length()));
+        return WriteStringCharacters(value, static_cast<unsigned int>(value.length()));
     }
 
     // Read characters into a std::string (no length prefix)
@@ -201,7 +239,7 @@ public:
         result = "";
         if (uiLength)
         {
-            if (!CanReadNumberOfBytes(uiLength))
+            if (!CanReadNumberOfBytes(static_cast<int>(uiLength)))
             {
                 printf("[bitstream]   -> FAILED: not enough bytes (have %d bits, need %u)\n",
                        GetNumberOfUnreadBits(), uiLength * 8);
@@ -243,22 +281,72 @@ public:
         return ReadStringCharacters(result, length);
     }
 
-    // Write a string with ushort length prefix
-    template <typename SizeType = unsigned short>
-    void WriteString(const std::string& value)
+    // Write variable size length
+    void WriteLength(unsigned int uiLength)
     {
-        SizeType length = static_cast<SizeType>(value.length());
-        Write(length);
-        if (length > 0)
-            Write(value.c_str(), length);
+        if (uiLength <= 0x7F)
+        {
+            Write(static_cast<unsigned char>(uiLength));
+        }
+        else if (uiLength <= 0x7EFF)
+        {
+            Write(static_cast<unsigned char>((uiLength >> 8) + 128));
+            Write(static_cast<unsigned char>(uiLength & 0xFF));
+        }
+        else
+        {
+            Write(static_cast<unsigned char>(255));
+            Write(uiLength);
+        }
     }
 
-    // Write string characters (no length prefix)
-    void WriteStringCharacters(const std::string& value, unsigned int uiLength)
+    // Read variable size length
+    bool ReadLength(unsigned int& uiOutLength)
     {
-        if (uiLength > 0 && uiLength <= value.length())
-            Write(value.c_str(), uiLength);
+        uiOutLength = 0;
+        unsigned char ucValue = 0;
+        if (!Read(ucValue))
+            return false;
+
+        if (ucValue <= 0x7F)
+        {
+            uiOutLength = ucValue;
+        }
+        else if (ucValue != 255)
+        {
+            unsigned char ucValue2 = 0;
+            if (!Read(ucValue2))
+                return false;
+            uiOutLength = ((ucValue - 128) << 8) + ucValue2;
+        }
+        else
+        {
+            if (!Read(uiOutLength))
+                return false;
+        }
+        return true;
     }
+
+    // Read a string (incl. variable size header)
+    bool ReadStr(std::string& result)
+    {
+        result = "";
+        unsigned int uiLength = 0;
+        if (!ReadLength(uiLength))
+            return false;
+        return ReadStringCharacters(result, uiLength);
+    }
+};
+
+//=============================================================================
+// Sync structure interface (matches Shared/sdk/net/bitstream.h)
+//=============================================================================
+
+struct ISyncStructure
+{
+    virtual ~ISyncStructure() {}
+    virtual bool Read(NetBitStreamInterface& bitStream) = 0;
+    virtual void Write(NetBitStreamInterface& bitStream) const = 0;
 };
 
 //=============================================================================
@@ -288,8 +376,8 @@ public:
     virtual void Write(const int& input) override;
     virtual void Write(const float& input) override;
     virtual void Write(const double& input) override;
-    virtual void Write(const char* input, int numberOfBytes) override;
     virtual void Write(const ISyncStructure* syncStruct) override;
+    virtual void Write(const char* input, int numberOfBytes) override;
 
     // Compressed write
     virtual void WriteCompressed(const unsigned char& input) override;
@@ -322,8 +410,8 @@ public:
     virtual bool Read(int& output) override;
     virtual bool Read(float& output) override;
     virtual bool Read(double& output) override;
-    virtual bool Read(char* output, int numberOfBytes) override;
     virtual bool Read(ISyncStructure* syncStruct) override;
+    virtual bool Read(char* output, int numberOfBytes) override;
 
     // Compressed read
     virtual bool ReadCompressed(unsigned char& output) override;

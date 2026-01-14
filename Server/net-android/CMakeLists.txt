@@ -107,6 +107,24 @@ install(TARGETS net_android
     RUNTIME DESTINATION bin
 )
 
+# Optional harness for bitstream compatibility checks
+option(NET_ANDROID_BUILD_HARNESS "Build bitstream compatibility harness" OFF)
+if(NET_ANDROID_BUILD_HARNESS)
+    add_executable(bitstream_harness
+        bitstream_harness.cpp
+        CNetBitStreamAndroid.cpp
+        CNetBitStreamAndroid.h
+    )
+    target_include_directories(bitstream_harness PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    if(WIN32)
+        target_link_libraries(bitstream_harness PRIVATE ws2_32)
+    else()
+        target_link_libraries(bitstream_harness PRIVATE pthread)
+    endif()
+endif()
+
 # Print configuration
 message(STATUS "")
 message(STATUS "=== net_android Configuration ===")

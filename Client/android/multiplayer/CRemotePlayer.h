@@ -36,7 +36,7 @@ namespace MTA::Android::Multiplayer
 //=============================================================================
 
 constexpr float INTERPOLATION_WARP_THRESHOLD = 50.0f;  // Teleport if > 50 units
-constexpr int SYNC_TIMEOUT_MS = 5000;                   // Consider stale after 5s
+constexpr int SYNC_TIMEOUT_MS = 15000;                  // Consider stale after 15s (debug to keep players alive)
 constexpr int INTERPOLATION_TIME_MS = 100;              // 100ms between syncs
 
 //=============================================================================
@@ -1202,6 +1202,8 @@ inline void CRemotePlayer::DebugDumpPedState(const char* context)
     // - After CPhysical: audio entities, then CPed members
 
     // Raw memory dump at potential intelligence locations
+    uintptr_t val_538 = *reinterpret_cast<uintptr_t*>(m_pedPtr + 0x538);
+    uintptr_t val_540 = *reinterpret_cast<uintptr_t*>(m_pedPtr + 0x540);
     uintptr_t val_598 = *reinterpret_cast<uintptr_t*>(m_pedPtr + 0x598);
     uintptr_t val_5A0 = *reinterpret_cast<uintptr_t*>(m_pedPtr + 0x5A0);
     uintptr_t val_5A8 = *reinterpret_cast<uintptr_t*>(m_pedPtr + 0x5A8);
@@ -1229,9 +1231,11 @@ inline void CRemotePlayer::DebugDumpPedState(const char* context)
     REMOTE_LOGW("=== RAW PED DUMP [%s] Player %u ===", context, m_playerId);
     REMOTE_LOGW("  Ped: 0x%lx, VTable: 0x%lx", (unsigned long)m_pedPtr, (unsigned long)vtable);
     REMOTE_LOGW("  Matrix@0x18: 0x%lx, RpClump@0x20: 0x%lx", (unsigned long)matrix, (unsigned long)rpClump);
-    REMOTE_LOGW("  @0x598: 0x%lx (expect m_pIntelligence)", (unsigned long)val_598);
-    REMOTE_LOGW("  @0x5A0: 0x%lx (expect m_pPlayerData)", (unsigned long)val_5A0);
-    REMOTE_LOGW("  @0x5A8: 0x%lx", (unsigned long)val_5A8);
+    REMOTE_LOGW("  @0x538: 0x%lx (SA-MP 2.10 m_pIntelligence?)", (unsigned long)val_538);
+    REMOTE_LOGW("  @0x540: 0x%lx (SA-MP 2.10 m_pPlayerData?)", (unsigned long)val_540);
+    REMOTE_LOGW("  @0x598: 0x%lx (m_pIntelligence alt)", (unsigned long)val_598);
+    REMOTE_LOGW("  @0x5A0: 0x%lx (m_pPlayerData alt)", (unsigned long)val_5A0);
+    REMOTE_LOGW("  @0x5A8: 0x%lx (m_pIntelligence alt2)", (unsigned long)val_5A8);
     REMOTE_LOGW("  @0x5AC: 0x%08X, @0x5B0: 0x%08X, @0x5B4: 0x%08X", word_5AC, word_5B0, word_5B4);
     REMOTE_LOGW("  health@0x580: %.2f, @0x5C0: %.2f, @0x5D0: %.2f", health_580, health_5C0, health_5D0);
 
@@ -1324,13 +1328,29 @@ inline void CRemotePlayer::EnsureIntelligence()
     }
 
 #if defined(__aarch64__)
-    // Check if m_pIntelligence is NULL at offset 0x598
-    uintptr_t* intelligencePtr = reinterpret_cast<uintptr_t*>(m_pedPtr + 0x598);
-    if (*intelligencePtr != 0)
+    // Check if m_pIntelligence exists at any known offset (SA-MP 2.10 vs newer layouts).
+    struct Candidate
     {
-        REMOTE_LOGD("Player %u: Intelligence already exists at 0x%lx",
-                    m_playerId, (unsigned long)*intelligencePtr);
-        return;
+        uintptr_t offset;
+        const char* label;
+    };
+    const Candidate candidates[] = {
+        {0x538, "0x538"},
+        {0x598, "0x598"},
+        {0x5A8, "0x5A8"},
+    };
+
+    for (const auto& candidate : candidates)
+    {
+        uintptr_t value = *reinterpret_cast<uintptr_t*>(m_pedPtr + candidate.offset);
+        if (value != 0)
+        {
+            REMOTE_LOGD("Player %u: Intelligence already exists at %s -> 0x%lx",
+                        m_playerId,
+                        candidate.label,
+                        (unsigned long)value);
+            return;
+        }
     }
 
     // CPedIntelligence::CPedIntelligence(CPed* ped) - ARM64 offset 0x5BC510
@@ -1343,7 +1363,7 @@ inline void CRemotePlayer::EnsureIntelligence()
     // However, this is complex and may crash if not done correctly.
     // For now, let's just log that intelligence is NULL and rely on other methods.
 
-    REMOTE_LOGW("Player %u: m_pIntelligence is NULL - task system won't work", m_playerId);
+    REMOTE_LOGW("Player %u: m_pIntelligence is NULL at all known offsets (0x538/0x598/0x5A8)", m_playerId);
     REMOTE_LOGW("  This means SetInitialState may not function correctly");
     REMOTE_LOGW("  Using invulnerability flags instead to prevent dead pose");
 #endif
