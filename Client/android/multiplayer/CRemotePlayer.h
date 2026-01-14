@@ -14,6 +14,7 @@
 #include <string>
 #include <chrono>
 #include <atomic>
+#include <algorithm>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -436,6 +437,11 @@ private:
     void SetPedStateFunc(uint32_t state);
 
     /**
+     * Call CPed::SetMoveState via game function (moves animations to walk/run)
+     */
+    void SetMoveStateFunc(uint8_t state);
+
+    /**
      * DEBUG: Dump ped state - read back all important values to understand what's happening
      */
     void DebugDumpPedState(const char* context);
@@ -476,6 +482,9 @@ private:
     bool m_spawned;
     uint64_t m_pedCreationTime;  // Time when ped was created (for state maintenance)
     uint64_t m_lastSetInitialStateCall;  // Track SetInitialState calls to avoid calling every frame
+    CVector3D m_lastMovePosition;
+    uint64_t m_lastMoveTime;
+    uint8_t m_lastMoveState;
 
     // Sync data
     RemoteSyncData m_syncData;
@@ -506,6 +515,9 @@ inline CRemotePlayer::CRemotePlayer(uint32_t playerId, const std::string& nickna
     , m_spawned(false)
     , m_pedCreationTime(0)
     , m_lastSetInitialStateCall(0)
+    , m_lastMovePosition()
+    , m_lastMoveTime(0)
+    , m_lastMoveState(0xFF)
     , m_currentRotation(0)
 {
     REMOTE_LOGI("Created remote player %u: %s", playerId, nickname.c_str());
@@ -630,47 +642,49 @@ inline void CRemotePlayer::UpdateSyncData(const RemoteSyncData& data)
 {
     uint64_t now = GetTimeMs();
 
+    RemoteSyncData adjusted = data;
+
     // Check if this is newer data
-    if (data.syncTimeContext < m_syncData.syncTimeContext &&
-        m_syncData.syncTimeContext - data.syncTimeContext < 32768)
+    if (adjusted.syncTimeContext < m_syncData.syncTimeContext &&
+        m_syncData.syncTimeContext - adjusted.syncTimeContext < 128)
     {
         // Old packet, ignore
         return;
     }
 
     // Ignore invalid positions (0,0,0) which can cause oscillation
-    if (data.position.x == 0.0f && data.position.y == 0.0f && data.position.z == 0.0f)
+    if (adjusted.position.x == 0.0f && adjusted.position.y == 0.0f && adjusted.position.z == 0.0f)
     {
         REMOTE_LOGD("Player %u: Ignoring invalid (0,0,0) position in sync data", m_playerId);
         return;
     }
 
     // Calculate distance to new position
-    float distance = m_currentPosition.DistanceTo(data.position);
+    float distance = m_currentPosition.DistanceTo(adjusted.position);
 
     // If distance is huge, teleport instead of interpolate
     if (distance > INTERPOLATION_WARP_THRESHOLD)
     {
         REMOTE_LOGI("Player %u warped %.1f units - using CPed::Teleport", m_playerId, distance);
-        m_currentPosition = data.position;
-        m_currentRotation = data.rotation;
+        m_currentPosition = adjusted.position;
+        m_currentRotation = adjusted.rotation;
         m_interp.active = false;
 
         // CRITICAL: Use CPed::Teleport instead of direct matrix manipulation
         // This properly updates all internal game state (collision, world sectors, etc.)
         if (HasPed())
         {
-            TeleportPed(data.position);
-            WritePedRotation(data.rotation);
+            TeleportPed(adjusted.position);
+            WritePedRotation(adjusted.rotation);
         }
     }
     else
     {
         // Set up interpolation
         m_interp.startPosition = m_currentPosition;
-        m_interp.targetPosition = data.position;
+        m_interp.targetPosition = adjusted.position;
         m_interp.startRotation = m_currentRotation;
-        m_interp.targetRotation = data.rotation;
+        m_interp.targetRotation = adjusted.rotation;
         m_interp.startTime = now;
         m_interp.finishTime = now + INTERPOLATION_TIME_MS;
         m_interp.lastAlpha = 0.0f;
@@ -678,7 +692,7 @@ inline void CRemotePlayer::UpdateSyncData(const RemoteSyncData& data)
     }
 
     // Update sync data
-    m_syncData = data;
+    m_syncData = adjusted;
     m_syncData.lastSyncTime = now;
 }
 
@@ -820,6 +834,35 @@ inline void CRemotePlayer::ApplyToGamePed()
 
     WritePedPosition(m_currentPosition);
     WritePedRotation(m_currentRotation);
+
+    const uint64_t now = GetTimeMs();
+    if (m_lastMoveTime != 0)
+    {
+        const float dt = static_cast<float>(now - m_lastMoveTime) / 1000.0f;
+        if (dt > 0.0f)
+        {
+            const float distance = m_currentPosition.DistanceTo(m_lastMovePosition);
+            uint8_t moveState = 1;  // PEDMOVE_STILL
+
+            if (distance < INTERPOLATION_WARP_THRESHOLD)
+            {
+                const float speed = distance / dt;
+                if (speed > 0.1f)
+                {
+                    moveState = (speed < 2.5f) ? 4 : 6;  // WALK or RUN
+                }
+            }
+
+            if (moveState != m_lastMoveState)
+            {
+                SetMoveStateFunc(moveState);
+                m_lastMoveState = moveState;
+            }
+        }
+    }
+
+    m_lastMovePosition = m_currentPosition;
+    m_lastMoveTime = now;
 }
 
 inline void CRemotePlayer::Spawn(const CVector3D& position, float rotation, uint16_t skinId)
@@ -918,6 +961,15 @@ inline void CRemotePlayer::WritePedRotation(float rotation)
 
     *atX = -sinf(rotation);
     *atY = cosf(rotation);
+
+    // Keep CPlaceable heading in sync with the matrix.
+#if defined(__aarch64__)
+    constexpr uint32_t HEADING_OFFSET = 0x14;
+#else
+    constexpr uint32_t HEADING_OFFSET = 0x10;
+#endif
+    float* heading = reinterpret_cast<float*>(m_pedPtr + HEADING_OFFSET);
+    *heading = rotation;
 }
 
 inline void CRemotePlayer::TeleportPed(const CVector3D& position)
@@ -1103,6 +1155,38 @@ inline void CRemotePlayer::SetPedStateFunc(uint32_t state)
     SetPedStateFn fnSetPedState = reinterpret_cast<SetPedStateFn>(m_gameBase + 0x597FF0);
 
     fnSetPedState(reinterpret_cast<void*>(m_pedPtr), state);
+#endif
+}
+
+inline void CRemotePlayer::SetMoveStateFunc(uint8_t state)
+{
+    if (m_pedPtr == 0 || m_pendingSlot >= 0)
+        return;
+
+    if (m_gameBase == 0)
+    {
+        auto& factory = CPedFactory::GetInstance();
+        if (factory.IsInitialized())
+        {
+            m_gameBase = factory.GetGameBase();
+        }
+        else
+        {
+            REMOTE_LOGE("SetMoveStateFunc: No game base available");
+            return;
+        }
+    }
+
+#if defined(__aarch64__)
+    typedef void (*SetMoveStateFn)(void* ped, uint8_t state);
+    SetMoveStateFn fnSetMoveState = reinterpret_cast<SetMoveStateFn>(
+        m_gameBase + MTA::Android::ARM::ARM64::CPed_SetMoveState);
+    fnSetMoveState(reinterpret_cast<void*>(m_pedPtr), state);
+#elif defined(__arm__)
+    typedef void (*SetMoveStateFn)(void* ped, uint8_t state);
+    SetMoveStateFn fnSetMoveState = reinterpret_cast<SetMoveStateFn>(
+        m_gameBase + MTA::Android::ARM::ARM32::CPed_SetMoveState);
+    fnSetMoveState(reinterpret_cast<void*>(m_pedPtr), state);
 #endif
 }
 

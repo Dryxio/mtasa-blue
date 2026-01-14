@@ -155,6 +155,7 @@ public:
         for (int i = 0; i < MAX_REMOTE_PLAYERS; i++)
         {
             m_remotePlayerKeys[i].Reset();
+            m_remotePedPtrs[i] = 0;
         }
 
         // Install hooks
@@ -209,6 +210,16 @@ public:
     }
 
     /**
+     * Register remote player ped pointer for slot lookup
+     */
+    void SetRemotePlayerPed(uint8_t playerSlot, uintptr_t pedPtr)
+    {
+        if (playerSlot >= MAX_REMOTE_PLAYERS)
+            return;
+        m_remotePedPtrs[playerSlot] = pedPtr;
+    }
+
+    /**
      * Get the current player being processed
      */
     uint8_t GetCurrentPlayer() const { return m_currentPlayer; }
@@ -245,6 +256,7 @@ private:
     // Key storage
     PAD_KEYS m_localPlayerKeys;
     PAD_KEYS m_remotePlayerKeys[MAX_REMOTE_PLAYERS];
+    uintptr_t m_remotePedPtrs[MAX_REMOTE_PLAYERS]{};
 
     //=========================================================================
     // Original function pointers
@@ -405,27 +417,30 @@ inline void CPadHooks::Hook_ProcessControl(uintptr_t thiz)
 {
     auto& hooks = GetInstance();
 
-    // Find which player this ped belongs to
-    // For now, we check if it's a remote player by comparing ped pointers
-    // This will be improved to use proper player lookup
-
     uint8_t playerSlot = 0;  // 0 = local player
+    for (uint8_t i = 1; i < MAX_REMOTE_PLAYERS; i++)
+    {
+        if (hooks.m_remotePedPtrs[i] == thiz)
+        {
+            playerSlot = i;
+            break;
+        }
+    }
 
-    // TODO: Implement FindPlayerNumFromPedPtr equivalent
-    // For now, we use a simple approach based on CWorld::PlayerInFocus
+    if (hooks.m_pPlayerInFocus == nullptr || s_CPed_ProcessControl == nullptr)
+    {
+        return;
+    }
 
     uint8_t savedPlayerInFocus = *hooks.m_pPlayerInFocus;
-
     if (playerSlot > 0)
     {
-        // Remote player
         *hooks.m_pPlayerInFocus = playerSlot;
         s_CPed_ProcessControl(thiz);
         *hooks.m_pPlayerInFocus = savedPlayerInFocus;
     }
     else
     {
-        // Local player
         s_CPed_ProcessControl(thiz);
     }
 }
@@ -504,6 +519,18 @@ inline bool CPadHooks::InstallHooks()
     }
     s_CPad_GetJump = reinterpret_cast<uint32_t(*)(uintptr_t)>(trampoline);
     PAD_LOGI("Hooked GetJump at 0x%lx", (unsigned long)(m_gameBase + ARM64::CPAD_GETJUMP));
+
+    // Hook CPed::ProcessControl (to set PlayerInFocus for remote peds)
+    if (!ARMHookInstallWithOriginal(
+            static_cast<uint32_t>(ARM64::CPED_PROCESSCONTROL),
+            reinterpret_cast<uintptr_t>(Hook_ProcessControl),
+            &trampoline, PROLOG_SIZE))
+    {
+        PAD_LOGE("Failed to hook CPed::ProcessControl");
+        return false;
+    }
+    s_CPed_ProcessControl = reinterpret_cast<void(*)(uintptr_t)>(trampoline);
+    PAD_LOGI("Hooked CPed::ProcessControl at 0x%lx", (unsigned long)(m_gameBase + ARM64::CPED_PROCESSCONTROL));
 
     PAD_LOGI("All CPad hooks installed successfully");
     return true;

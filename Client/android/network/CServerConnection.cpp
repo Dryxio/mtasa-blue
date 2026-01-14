@@ -5,6 +5,7 @@
  */
 
 #include "CServerConnection.h"
+#include "SyncStructures.h"
 #include <android/log.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <cmath>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -26,6 +28,61 @@
 
 namespace MTA::Android::Network
 {
+
+namespace
+{
+SControllerState BuildControllerFromVelocity(float vx, float vy, float rotation)
+{
+    SControllerState state;
+
+    const float speed = std::sqrt(vx * vx + vy * vy);
+    if (speed < 0.01f)
+        return state;
+
+    constexpr float MAX_SPEED = 4.5f;
+    constexpr float RUN_THRESHOLD = 3.2f;
+
+    float moveHeading = std::atan2(-vx, vy);
+    float relative = moveHeading - rotation;
+    relative = WrapAngle(relative);
+
+    float localX = std::sin(relative);
+    float localY = std::cos(relative);
+
+    float factor = speed / MAX_SPEED;
+    if (factor > 1.0f) factor = 1.0f;
+
+    state.LeftStickX = static_cast<int16_t>(std::lround(localX * 128.0f * factor));
+    state.LeftStickY = static_cast<int16_t>(std::lround(-localY * 128.0f * factor));
+
+    if (speed > RUN_THRESHOLD)
+    {
+        state.ButtonCross = 255;  // Sprint
+    }
+    else
+    {
+        state.m_bPedWalk = 1;  // Walk
+    }
+
+    return state;
+}
+
+void WriteCameraOrientationPlaceholder(NetBitStream& bs, float camRotation)
+{
+    // Minimal placeholder that preserves bitstream alignment for MTA PC format.
+    WriteFloatAsBits(bs, 8, -PI, PI, camRotation, false);  // Cam rot Z
+    WriteFloatAsBits(bs, 8, -PI, PI, 0.0f, false);         // Cam rot X
+
+    // Offset section: use relative position with smallest range and zero offsets.
+    bs.WriteBit(false);  // bUseAbsolutePosition
+    uint8_t idx = 0;
+    bs.WriteBits(&idx, 2);
+
+    WriteFloatAsBits(bs, 3, -4.0f, 4.0f, 0.0f, false);
+    WriteFloatAsBits(bs, 3, -4.0f, 4.0f, 0.0f, false);
+    WriteFloatAsBits(bs, 3, -4.0f, 4.0f, 0.0f, false);
+}
+} // namespace
 
 //=============================================================================
 // MD5 Implementation
@@ -1162,49 +1219,66 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
         return;
     }
 
-    // Time context (for ordering/lag compensation)
-    uint16_t timeContext = static_cast<uint16_t>(GetCurrentTimeMs() & 0xFFFF);
-    bitStream->Write(timeContext);
+    // Sync context
+    uint8_t syncTimeContext = static_cast<uint8_t>(GetCurrentTimeMs() & 0xFF);
+    bitStream->Write(syncTimeContext);
 
-    // Player puresync flags (15 bits)
-    // Bit 0: isInWater, Bit 1: isOnGround, Bit 2: hasJetPack, etc.
-    uint16_t flags = 0;
-    if (onGround) flags |= 0x0002;  // isOnGround
+    // Controller state (derived from movement for now)
+    SControllerState controller = BuildControllerFromVelocity(vx, vy, rotation);
+    WriteFullKeysync(controller, *bitStream);
 
-    // Check if we have velocity
-    bool hasVelocity = (vx != 0.0f || vy != 0.0f || vz != 0.0f);
-    if (hasVelocity) flags |= 0x0400;  // syncingVelocity
+    // Player puresync flags (PC format)
+    SPlayerPuresyncFlags flags;
+    flags.isOnGround = onGround;
+    flags.isInWater = false;
+    flags.hasJetPack = false;
+    flags.isDucked = false;
+    flags.wearsGoggles = false;
+    flags.hasContact = false;
+    flags.isChoking = false;
+    flags.akimboTargetUp = false;
+    flags.isOnFire = false;
+    flags.hasAWeapon = false;
+    flags.syncingVelocity = (vx != 0.0f || vy != 0.0f || vz != 0.0f);
+    flags.stealthAiming = false;
+    flags.isReloadingWeapon = false;
+    flags.animInterrupted = false;
+    flags.hangingDuringClimb = false;
+    flags.Write(*bitStream);
 
-    bitStream->WriteBits(reinterpret_cast<uint8_t*>(&flags), 15);
+    // Position (PC compressed format)
+    SPcPositionSync pos(false);
+    pos.x = x;
+    pos.y = y;
+    pos.z = z;
+    pos.Write(*bitStream);
 
-    // Position (3 floats)
-    bitStream->Write(x);
-    bitStream->Write(y);
-    bitStream->Write(z);
+    // Rotation (PC 16-bit)
+    SPcPedRotationSync pedRot;
+    pedRot.rotation = rotation;
+    pedRot.Write(*bitStream);
 
-    // Rotation (16-bit compressed from -PI to PI)
-    float normalizedRot = (rotation + 3.141593f) / 6.283185f;  // 0 to 1
-    uint16_t rotCompressed = static_cast<uint16_t>(normalizedRot * 65535.0f);
-    bitStream->Write(rotCompressed);
-
-    // Velocity (if syncing)
-    if (hasVelocity)
+    // Velocity (PC format)
+    if (flags.syncingVelocity)
     {
-        bitStream->WriteBit(true);  // Has non-zero velocity
-        bitStream->Write(vx);
-        bitStream->Write(vy);
-        bitStream->Write(vz);
+        SPcVelocitySync vel;
+        vel.x = vx;
+        vel.y = vy;
+        vel.z = vz;
+        vel.Write(*bitStream);
     }
 
-    // Health (8-bit, 0-200 range)
-    bitStream->Write(static_cast<uint8_t>(100));  // Full health for now
-
-    // Armor (8-bit)
+    // Health/armor (8-bit)
+    bitStream->Write(static_cast<uint8_t>(100));
     bitStream->Write(static_cast<uint8_t>(0));
 
-    // Camera rotation (12-bit compressed) - same as player rotation for now
-    uint16_t camRot = rotCompressed >> 4;  // Use top 12 bits
-    bitStream->WriteBits(reinterpret_cast<uint8_t*>(&camRot), 12);
+    // Camera rotation (12-bit)
+    SPcCameraRotationSync camRot;
+    camRot.rotation = rotation;
+    camRot.Write(*bitStream);
+
+    // Camera orientation block (placeholder)
+    WriteCameraOrientationPlaceholder(*bitStream, rotation);
 
     // Send packet directly via our socket (not through CNetAndroid which has a separate socket)
     if (m_socket >= 0)

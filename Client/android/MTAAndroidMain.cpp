@@ -73,11 +73,38 @@ namespace MTA::Android
     static std::thread g_playerManagerThread;
     static std::atomic<bool> g_playerManagerRunning{false};
 
+    // Simple test hook: CGame::Process
+    using CGameProcess_t = void (*)();
+    static CGameProcess_t g_origCGameProcess = nullptr;
+    static uint32_t g_cgameProcessTicks = 0;
+
     // Forward declarations
     void StartPlayerSync();
     void InitializeGameBypass();
     void EarlyInitializePedFactory();
     void StartPlayerManagerProcessing();
+
+    // =============================================================================
+    // Hook Functions
+    // =============================================================================
+
+    void Hook_CGame_Process_Resolved()
+    {
+        if (g_origCGameProcess)
+        {
+            g_origCGameProcess();
+        }
+
+        // Low-noise heartbeat to confirm hook execution.
+        if (g_cgameProcessTicks == 0)
+        {
+            LOGD("CGame::Process hook first tick");
+        }
+        if ((++g_cgameProcessTicks % 60) == 0)
+        {
+            LOGD("CGame::Process hook tick=%u", g_cgameProcessTicks);
+        }
+    }
 
     // =============================================================================
     // Library Detection
@@ -233,7 +260,52 @@ namespace MTA::Android
         }
         */
 
-        LOGI("Hook installation complete");
+        bool installedAny = false;
+
+        if (!Hooks::Initialize())
+        {
+            LOGW("Hook system init failed; falling back to manual base setup");
+            Hooks::g_libGTASA = g_gtasaLib.base;
+            Hooks::g_pageSize = sysconf(_SC_PAGESIZE);
+        }
+
+        uintptr_t cgameProcess = mapper.GetARMAddress("CGame::Process");
+        if (!g_gtasaLib.loaded || cgameProcess == 0)
+        {
+            LOGW("CGame::Process not resolved; skipping hook");
+        }
+        else
+        {
+            uint32_t offset = static_cast<uint32_t>(cgameProcess - g_gtasaLib.base);
+            uintptr_t trampoline = 0;
+#if defined(__aarch64__)
+            constexpr size_t prologSize = 16;
+#else
+            constexpr size_t prologSize = 8;
+#endif
+            if (Hooks::ARMHookInstallWithOriginal(offset,
+                                                 (uintptr_t)&Hook_CGame_Process_Resolved,
+                                                 &trampoline, prologSize))
+            {
+                g_origCGameProcess = reinterpret_cast<CGameProcess_t>(trampoline);
+                installedAny = true;
+                LOGI("Installed CGame::Process hook at 0x%lX", cgameProcess);
+            }
+            else
+            {
+                LOGW("Failed to install CGame::Process hook");
+            }
+        }
+
+        if (!installedAny)
+        {
+            LOGW("No hooks installed (continuing without hooks)");
+        }
+        else
+        {
+            LOGI("Hook installation complete");
+        }
+
         return true;
     }
 

@@ -5,8 +5,10 @@
  */
 
 #include "CPacketHandler.h"
+#include "SyncStructures.h"
 
 #include <android/log.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -456,7 +458,7 @@ void CPacketHandler::Packet_PlayerList(NetBitStream& bitStream)
         std::string nickname;
         uint16_t nicknameLength;
 
-        if (!bitStream.Read(playerId)) break;
+        if (!ReadElementId(bitStream, playerId)) break;
         if (!bitStream.Read(nicknameLength)) break;
         if (nicknameLength > 256) break;
 
@@ -480,7 +482,7 @@ void CPacketHandler::Packet_PlayerJoin(NetBitStream& bitStream)
     uint32_t playerId;
     std::string nickname;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(nickname, 256)) return;
 
     LOGI("CPacketHandler: Player joined: %s (ID: %u)", nickname.c_str(), playerId);
@@ -500,7 +502,7 @@ void CPacketHandler::Packet_PlayerQuit(NetBitStream& bitStream)
     uint32_t playerId;
     uint8_t quitReason;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(quitReason)) return;
 
     LOGI("CPacketHandler: Player quit: ID %u (reason: %d)", playerId, quitReason);
@@ -522,7 +524,7 @@ void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
     float rotation;
     uint16_t skinId;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(x)) return;
     if (!bitStream.Read(y)) return;
     if (!bitStream.Read(z)) return;
@@ -549,8 +551,8 @@ void CPacketHandler::Packet_PlayerWasted(NetBitStream& bitStream)
     uint8_t weaponId;
     uint8_t bodypart;
 
-    if (!bitStream.Read(playerId)) return;
-    bitStream.Read(killerId);
+    if (!ReadElementId(bitStream, playerId)) return;
+    if (!ReadElementId(bitStream, killerId)) return;
     bitStream.Read(weaponId);
     bitStream.Read(bodypart);
 
@@ -562,7 +564,7 @@ void CPacketHandler::Packet_PlayerChangeNick(NetBitStream& bitStream)
     uint32_t playerId;
     std::string newNickname;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(newNickname, 256)) return;
 
     LOGI("CPacketHandler: Player %u changed nick to: %s", playerId, newNickname.c_str());
@@ -575,104 +577,112 @@ void CPacketHandler::Packet_PlayerChangeNick(NetBitStream& bitStream)
 void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
 {
     uint32_t playerId;
-    uint16_t timeContext;
-    float x, y, z;
-    float rotation;
+    uint8_t syncTimeContext = 0;
+    uint16_t latency = 0;
 
     // Read player ID first (added by server relay)
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
 
     // Skip if this is our own sync (server echoing)
     if (playerId == m_localPlayerId)
         return;
 
-    // Read time context
-    if (!bitStream.Read(timeContext)) return;
+    if (!bitStream.Read(syncTimeContext)) return;
+    if (!bitStream.ReadCompressed(latency)) return;
 
-    // Note: No latency field - packet format matches SendPlayerSync()
+    SControllerState controllerState;
+    if (!ReadFullKeysync(controllerState, bitStream)) return;
 
-    // Read flags (15 bits for player puresync)
-    uint16_t flags = 0;
-    bitStream.ReadBits(reinterpret_cast<uint8_t*>(&flags), 15);
+    SPlayerPuresyncFlags flags;
+    if (!flags.Read(bitStream)) return;
 
-    // Read position
-    if (!bitStream.Read(x)) return;
-    if (!bitStream.Read(y)) return;
-    if (!bitStream.Read(z)) return;
-
-    // Read rotation (16-bit compressed to -PI to PI)
-    uint16_t rotationCompressed;
-    if (!bitStream.Read(rotationCompressed)) return;
-    rotation = (rotationCompressed / 65535.0f * 6.283185f) - 3.141593f;
-
-    // Read velocity (if flag set)
-    float vx = 0, vy = 0, vz = 0;
-    bool hasVelocity = (flags & 0x0400) != 0;  // bSyncingVelocity flag
-    if (hasVelocity)
+    if (flags.hasContact)
     {
-        if (bitStream.ReadBit())  // Has non-zero velocity
+        uint32_t contactId = 0;
+        if (!ReadElementId(bitStream, contactId)) return;
+    }
+
+    SPcPositionSync position(false);
+    if (!position.Read(bitStream)) return;
+
+    SPcPedRotationSync rotationSync;
+    if (!rotationSync.Read(bitStream)) return;
+
+    SPcVelocitySync velocitySync;
+    if (flags.syncingVelocity)
+    {
+        if (!velocitySync.Read(bitStream)) return;
+    }
+
+    uint8_t health = 100;
+    uint8_t armor = 0;
+    if (!bitStream.Read(health)) return;
+    if (!bitStream.Read(armor)) return;
+
+    SPcCameraRotationSync camRotation;
+    if (!camRotation.Read(bitStream)) return;
+
+    uint8_t weaponSlot = 0;
+    uint16_t ammoInClip = 0;
+    if (flags.hasAWeapon)
+    {
+        SPcWeaponSlotSync slot;
+        if (!slot.Read(bitStream)) return;
+        weaponSlot = slot.slot;
+
+        auto doesSlotHaveAmmo = [](uint8_t slotId) -> bool {
+            switch (slotId)
+            {
+                case 0:
+                case 1:
+                case 10:
+                case 11:
+                case 12:
+                    return false;
+                default:
+                    return true;
+            }
+        };
+
+        if (doesSlotHaveAmmo(weaponSlot))
         {
-            bitStream.Read(vx);
-            bitStream.Read(vy);
-            bitStream.Read(vz);
+            SWeaponAmmoSync ammo;
+            if (!ammo.Read(bitStream, true, true)) return;
+            ammoInClip = ammo.ammoInClip;
+
+            const bool aimFull = (controllerState.RightShoulder1 != 0) || (controllerState.ButtonCircle != 0);
+            SWeaponAimSync aim(0.0f, aimFull);
+            if (!aim.Read(bitStream)) return;
         }
     }
 
-    // Read health and armor
-    uint8_t health = 100, armor = 0;
-    bitStream.Read(health);
-    bitStream.Read(armor);
+    // Convert controller state to pad input (0-255 range, center=128)
+    uint8_t leftStickX = static_cast<uint8_t>(std::clamp(128 + controllerState.LeftStickX, 0, 255));
+    uint8_t leftStickY = static_cast<uint8_t>(std::clamp(128 + controllerState.LeftStickY, 0, 255));
 
-    // Read controller state for animations (MTA format: 0-255, center=128)
-    uint8_t leftStickX = 128, leftStickY = 128;  // Default to center (no movement)
     uint16_t keyFlags = 0;
-
-    // Derive movement direction from velocity
-    // If the player is moving, calculate analog stick values from velocity direction
-    if (hasVelocity && (vx != 0.0f || vy != 0.0f))
-    {
-        // Calculate movement direction from velocity
-        // velocity.x -> Left/Right, velocity.y -> Up/Down (relative to player facing)
-        // For simplicity, use velocity directly as stick input
-        float speed = sqrtf(vx * vx + vy * vy);
-        if (speed > 0.01f)
-        {
-            // Normalize to -128 to 127 range, then shift to 0-255
-            // Assuming max speed ~20 units/s for running
-            float normalizedX = (vx / 20.0f);
-            float normalizedY = (vy / 20.0f);
-            if (normalizedX > 1.0f) normalizedX = 1.0f;
-            if (normalizedX < -1.0f) normalizedX = -1.0f;
-            if (normalizedY > 1.0f) normalizedY = 1.0f;
-            if (normalizedY < -1.0f) normalizedY = -1.0f;
-
-            // Convert to 0-255 range (128 = center)
-            leftStickX = static_cast<uint8_t>(128 + normalizedX * 127);
-            leftStickY = static_cast<uint8_t>(128 + normalizedY * 127);
-        }
-    }
-
-    // Extract key states from flags
-    // MTA flags map to our key format:
-    // 0x0001 = in water, 0x0002 = on ground, 0x0004 = has jet pack
-    // 0x0008 = ducked, 0x0010 = wearing goggle, 0x0020 = has contact
-    // 0x0040 = choking, 0x0080 = aiming, 0x0100 = first person
-    // 0x0200 = in water (again?), 0x0400 = syncing velocity
-    // Convert relevant flags to key states
-    if (flags & 0x0008) keyFlags |= 0x0002;  // Ducked -> KEY_CROUCH
-    if (flags & 0x0080) keyFlags |= 0x0004;  // Aiming -> KEY_FIRE (aim)
+    if (controllerState.ButtonTriangle) keyFlags |= 0x0001;   // KEY_ACTION
+    if (controllerState.ShockButtonL)   keyFlags |= 0x0002;   // KEY_CROUCH
+    if (controllerState.ButtonCircle)  keyFlags |= 0x0004;   // KEY_FIRE
+    if (controllerState.ButtonCross)   keyFlags |= 0x0008;   // KEY_SPRINT
+    if (controllerState.LeftShoulder1) keyFlags |= 0x0010;   // KEY_SECONDARY_ATTACK
+    if (controllerState.ButtonSquare)  keyFlags |= 0x0020;   // KEY_JUMP
+    if (controllerState.RightShoulder1) keyFlags |= 0x0080;  // KEY_HANDBRAKE/AIM
+    if (controllerState.m_bPedWalk)    keyFlags |= 0x0400;   // KEY_WALK
 
     // Build sync data for player manager
     Multiplayer::RemoteSyncData syncData;
-    syncData.position = Multiplayer::CVector3D(x, y, z);
-    syncData.velocity = Multiplayer::CVector3D(vx, vy, vz);
-    syncData.rotation = rotation;
+    syncData.position = Multiplayer::CVector3D(position.x, position.y, position.z);
+    syncData.velocity = Multiplayer::CVector3D(velocitySync.x, velocitySync.y, velocitySync.z);
+    syncData.rotation = rotationSync.rotation;
     syncData.health = health;
     syncData.armor = armor;
-    syncData.syncTimeContext = timeContext;
-    syncData.isOnGround = (flags & 0x0002) != 0;
-    syncData.isInWater = (flags & 0x0001) != 0;
-    syncData.isDucked = (flags & 0x0008) != 0;
+    syncData.weaponSlot = weaponSlot;
+    syncData.ammo = ammoInClip;
+    syncData.syncTimeContext = syncTimeContext;
+    syncData.isOnGround = flags.isOnGround;
+    syncData.isInWater = flags.isInWater;
+    syncData.isDucked = flags.isDucked;
     syncData.controllerLeftStickX = leftStickX;
     syncData.controllerLeftStickY = leftStickY;
     syncData.keyFlags = keyFlags;
@@ -684,7 +694,7 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
     // Legacy callback
     if (m_callbacks.onPlayerSync)
     {
-        m_callbacks.onPlayerSync(playerId, x, y, z, rotation);
+        m_callbacks.onPlayerSync(playerId, position.x, position.y, position.z, rotationSync.rotation);
     }
 
     // Debug log (occasionally)
@@ -692,7 +702,7 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
     if (++syncLogCount >= 100)
     {
         LOGD("PURESYNC from player %u: pos=(%.1f,%.1f,%.1f) rot=%.2f health=%d",
-             playerId, x, y, z, rotation, health);
+             playerId, position.x, position.y, position.z, rotationSync.rotation, health);
         syncLogCount = 0;
     }
 }
@@ -703,7 +713,7 @@ void CPacketHandler::Packet_PlayerKeySync(NetBitStream& bitStream)
     uint16_t timeContext;
     uint16_t keys;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(timeContext)) return;
     if (!bitStream.Read(keys)) return;
 
@@ -718,9 +728,9 @@ void CPacketHandler::Packet_PlayerVehicleSync(NetBitStream& bitStream)
     uint32_t vehicleId;
     float x, y, z;
 
-    if (!bitStream.Read(playerId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
     if (!bitStream.Read(timeContext)) return;
-    if (!bitStream.Read(vehicleId)) return;
+    if (!ReadElementId(bitStream, vehicleId)) return;
     if (!bitStream.Read(x)) return;
     if (!bitStream.Read(y)) return;
     if (!bitStream.Read(z)) return;
@@ -757,7 +767,7 @@ void CPacketHandler::Packet_VehicleSpawn(NetBitStream& bitStream)
     float x, y, z;
     float rotation;
 
-    if (!bitStream.Read(vehicleId)) return;
+    if (!ReadElementId(bitStream, vehicleId)) return;
     if (!bitStream.Read(model)) return;
     if (!bitStream.Read(x)) return;
     if (!bitStream.Read(y)) return;
@@ -774,8 +784,8 @@ void CPacketHandler::Packet_VehicleInOut(NetBitStream& bitStream)
     uint32_t vehicleId;
     uint8_t action;  // 0=getting in, 1=getting out
 
-    if (!bitStream.Read(playerId)) return;
-    if (!bitStream.Read(vehicleId)) return;
+    if (!ReadElementId(bitStream, playerId)) return;
+    if (!ReadElementId(bitStream, vehicleId)) return;
     if (!bitStream.Read(action)) return;
 
     LOGI("CPacketHandler: Player %u %s vehicle %u",

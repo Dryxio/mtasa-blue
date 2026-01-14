@@ -162,20 +162,14 @@ void NetBitStream::Write(const std::string& str)
 
 void NetBitStream::WriteCompressed(uint16_t value)
 {
-    if (value == 0)
-    {
-        WriteBit(false);
-    }
-    else if (value <= 0xFF)
+    if ((value & 0xFF00) == 0)
     {
         WriteBit(true);
-        WriteBit(false);
-        Write(static_cast<uint8_t>(value));
+        Write(static_cast<uint8_t>(value & 0xFF));
     }
     else
     {
-        WriteBit(true);
-        WriteBit(true);
+        WriteBit(false);
         Write(value);
     }
 }
@@ -187,23 +181,14 @@ void NetBitStream::WriteCompressed(int16_t value)
 
 void NetBitStream::WriteCompressed(uint32_t value)
 {
-    if (value == 0)
-    {
-        WriteBit(false);
-    }
-    else if (value <= 0xFF)
+    if ((value & 0xFFFF0000) == 0)
     {
         WriteBit(true);
-        WriteBits(reinterpret_cast<const uint8_t*>(&value), 8);
-    }
-    else if (value <= 0xFFFF)
-    {
-        WriteBit(true);
-        WriteBits(reinterpret_cast<const uint8_t*>(&value), 16);
+        WriteCompressed(static_cast<uint16_t>(value & 0xFFFF));
     }
     else
     {
-        WriteBit(true);
+        WriteBit(false);
         Write(value);
     }
 }
@@ -248,14 +233,9 @@ void NetBitStream::WriteBit(bool value)
 
 void NetBitStream::WriteNormVector(float x, float y, float z)
 {
-    // Normalize and compress to 16 bits each
-    auto compress = [](float v) -> uint16_t {
-        v = std::max(-1.0f, std::min(1.0f, v));
-        return static_cast<uint16_t>((v + 1.0f) * 32767.5f);
-    };
-    Write(compress(x));
-    Write(compress(y));
-    Write(compress(z));
+    Write(x);
+    Write(y);
+    Write(z);
 }
 
 void NetBitStream::WriteVector(float x, float y, float z)
@@ -267,28 +247,10 @@ void NetBitStream::WriteVector(float x, float y, float z)
 
 void NetBitStream::WriteNormQuat(float w, float x, float y, float z)
 {
-    // Find largest component
-    float maxValue = std::abs(w);
-    int maxIndex = 0;
-    if (std::abs(x) > maxValue) { maxValue = std::abs(x); maxIndex = 1; }
-    if (std::abs(y) > maxValue) { maxValue = std::abs(y); maxIndex = 2; }
-    if (std::abs(z) > maxValue) { maxValue = std::abs(z); maxIndex = 3; }
-
-    // Write index
-    WriteBits(reinterpret_cast<const uint8_t*>(&maxIndex), 2);
-
-    // Write other 3 components compressed
-    auto writeComp = [this](float v) {
-        v = std::max(-0.7071068f, std::min(0.7071068f, v));
-        uint16_t compressed = static_cast<uint16_t>((v + 0.7071068f) * 46340.95f);
-        Write(compressed);
-    };
-
-    float sign = (maxIndex == 0 ? w : (maxIndex == 1 ? x : (maxIndex == 2 ? y : z))) >= 0 ? 1.0f : -1.0f;
-    if (maxIndex != 0) writeComp(w * sign);
-    if (maxIndex != 1) writeComp(x * sign);
-    if (maxIndex != 2) writeComp(y * sign);
-    if (maxIndex != 3) writeComp(z * sign);
+    Write(w);
+    Write(x);
+    Write(y);
+    Write(z);
 }
 
 bool NetBitStream::Read(uint8_t& value)
@@ -393,25 +355,16 @@ bool NetBitStream::Read(std::string& str, size_t maxLength)
 
 bool NetBitStream::ReadCompressed(uint16_t& value)
 {
-    bool hasValue = ReadBit();
-    if (!hasValue)
+    bool isByte = ReadBit();
+    if (isByte)
     {
-        value = 0;
-        return true;
-    }
-
-    bool is16bit = ReadBit();
-    if (is16bit)
-    {
-        return Read(value);
-    }
-    else
-    {
-        uint8_t byte;
+        uint8_t byte = 0;
         if (!Read(byte)) return false;
         value = byte;
         return true;
     }
+
+    return Read(value);
 }
 
 bool NetBitStream::ReadCompressed(int16_t& value)
@@ -424,12 +377,15 @@ bool NetBitStream::ReadCompressed(int16_t& value)
 
 bool NetBitStream::ReadCompressed(uint32_t& value)
 {
-    bool hasValue = ReadBit();
-    if (!hasValue)
+    bool isShort = ReadBit();
+    if (isShort)
     {
-        value = 0;
+        uint16_t temp = 0;
+        if (!ReadCompressed(temp)) return false;
+        value = temp;
         return true;
     }
+
     return Read(value);
 }
 
@@ -478,15 +434,7 @@ bool NetBitStream::ReadBit()
 
 bool NetBitStream::ReadNormVector(float& x, float& y, float& z)
 {
-    uint16_t cx, cy, cz;
-    if (!Read(cx)) return false;
-    if (!Read(cy)) return false;
-    if (!Read(cz)) return false;
-
-    x = (cx / 32767.5f) - 1.0f;
-    y = (cy / 32767.5f) - 1.0f;
-    z = (cz / 32767.5f) - 1.0f;
-    return true;
+    return Read(x) && Read(y) && Read(z);
 }
 
 bool NetBitStream::ReadVector(float& x, float& y, float& z)
@@ -499,35 +447,7 @@ bool NetBitStream::ReadVector(float& x, float& y, float& z)
 
 bool NetBitStream::ReadNormQuat(float& w, float& x, float& y, float& z)
 {
-    uint8_t maxIndex = 0;
-    if (!ReadBits(&maxIndex, 2)) return false;
-
-    auto readComp = [this](float& v) -> bool {
-        uint16_t compressed;
-        if (!Read(compressed)) return false;
-        v = (compressed / 46340.95f) - 0.7071068f;
-        return true;
-    };
-
-    w = x = y = z = 0.0f;
-    if (maxIndex != 0) { if (!readComp(w)) return false; }
-    if (maxIndex != 1) { if (!readComp(x)) return false; }
-    if (maxIndex != 2) { if (!readComp(y)) return false; }
-    if (maxIndex != 3) { if (!readComp(z)) return false; }
-
-    // Reconstruct the largest component
-    float sumSquares = w*w + x*x + y*y + z*z;
-    float largest = std::sqrt(std::max(0.0f, 1.0f - sumSquares));
-
-    switch (maxIndex)
-    {
-        case 0: w = largest; break;
-        case 1: x = largest; break;
-        case 2: y = largest; break;
-        case 3: z = largest; break;
-    }
-
-    return true;
+    return Read(w) && Read(x) && Read(y) && Read(z);
 }
 
 int NetBitStream::GetReadOffsetBits() const

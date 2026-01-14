@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include "CNetAndroid.h"
 
 namespace MTA::Android::Network
@@ -25,6 +26,8 @@ namespace MTA::Android::Network
 constexpr float SYNC_POSITION_LIMIT = 100000.0f;  // Max position value
 constexpr float PI = 3.14159265358979323846f;
 constexpr float TWO_PI = 2.0f * PI;
+constexpr uint32_t MAX_SERVER_ELEMENTS = 131072;
+constexpr uint32_t ELEMENT_ID_BITS = 17;
 
 //=============================================================================
 // Utility Functions
@@ -299,6 +302,479 @@ struct SRotationSync
 
         rotation = (compressed / 4095.0f * TWO_PI) - PI;
         return true;
+    }
+};
+
+//=============================================================================
+// PC-compatible sync helpers (MTA Windows protocol)
+//=============================================================================
+
+struct SControllerState
+{
+    int16_t LeftStickX = 0;
+    int16_t LeftStickY = 0;
+    int16_t LeftShoulder1 = 0;
+    int16_t RightShoulder1 = 0;
+    int16_t ButtonSquare = 0;
+    int16_t ButtonCross = 0;
+    int16_t ButtonCircle = 0;
+    int16_t ButtonTriangle = 0;
+    int16_t ShockButtonL = 0;
+    int16_t m_bPedWalk = 0;
+};
+
+inline bool ReadBitsToUInt(NetBitStream& bs, uint32_t& value, size_t bits)
+{
+    value = 0;
+    return bs.ReadBits(reinterpret_cast<uint8_t*>(&value), bits);
+}
+
+inline void WriteBitsFromUInt(NetBitStream& bs, uint32_t value, size_t bits)
+{
+    bs.WriteBits(reinterpret_cast<const uint8_t*>(&value), bits);
+}
+
+inline bool ReadFixedPoint(NetBitStream& bs, int totalBits, int fracBits, float& outValue)
+{
+    uint32_t raw = 0;
+    if (!ReadBitsToUInt(bs, raw, static_cast<size_t>(totalBits)))
+        return false;
+
+    const uint32_t signBit = 1u << (totalBits - 1);
+    int32_t signedValue = 0;
+    if (raw & signBit)
+    {
+        uint32_t mask = ~((1u << totalBits) - 1u);
+        signedValue = static_cast<int32_t>(raw | mask);
+    }
+    else
+    {
+        signedValue = static_cast<int32_t>(raw);
+    }
+
+    outValue = static_cast<float>(signedValue) / static_cast<float>(1 << fracBits);
+    return true;
+}
+
+inline void WriteFixedPoint(NetBitStream& bs, int totalBits, int fracBits, float value)
+{
+    const float scale = static_cast<float>(1 << fracBits);
+    const float maxVal = static_cast<float>((1 << (totalBits - 1)) - 1);
+    const float minVal = static_cast<float>(-(1 << (totalBits - 1)));
+    float clamped = ClampFloat(value, minVal, maxVal);
+    int32_t fixed = static_cast<int32_t>(std::lround(clamped * scale));
+    WriteBitsFromUInt(bs, static_cast<uint32_t>(fixed), static_cast<size_t>(totalBits));
+}
+
+inline float ReadFloatAsBits(NetBitStream& bs, int bits, float minValue, float maxValue)
+{
+    uint32_t raw = 0;
+    if (!ReadBitsToUInt(bs, raw, static_cast<size_t>(bits)))
+        return minValue;
+
+    const float alpha = static_cast<float>(raw) / static_cast<float>((1u << bits) - 1u);
+    return minValue + (maxValue - minValue) * alpha;
+}
+
+inline void WriteFloatAsBits(NetBitStream& bs, int bits, float minValue, float maxValue, float value, bool wrap)
+{
+    float v = value;
+    if (wrap)
+    {
+        v = WrapAngle(v);
+    }
+    else
+    {
+        v = ClampFloat(v, minValue, maxValue);
+    }
+
+    float alpha = (v - minValue) / (maxValue - minValue);
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+
+    uint32_t raw = static_cast<uint32_t>(std::lround(alpha * static_cast<float>((1u << bits) - 1u)));
+    WriteBitsFromUInt(bs, raw, static_cast<size_t>(bits));
+}
+
+inline bool ReadElementId(NetBitStream& bs, uint32_t& outId)
+{
+    uint32_t raw = 0;
+    if (!ReadBitsToUInt(bs, raw, ELEMENT_ID_BITS))
+        return false;
+
+    const uint32_t maxValue = (1u << ELEMENT_ID_BITS) - 1u;
+    if (raw == maxValue)
+        outId = 0xFFFFFFFFu;
+    else
+        outId = raw;
+    return true;
+}
+
+inline void WriteElementId(NetBitStream& bs, uint32_t id)
+{
+    uint32_t value = id;
+    const uint32_t maxValue = (1u << ELEMENT_ID_BITS) - 1u;
+    if (value == 0xFFFFFFFFu)
+        value = maxValue;
+    WriteBitsFromUInt(bs, value, ELEMENT_ID_BITS);
+}
+
+struct SPcPositionSync
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    bool useFloats = false;
+
+    SPcPositionSync(bool bUseFloats = false) : useFloats(bUseFloats) {}
+
+    bool Read(NetBitStream& bs)
+    {
+        if (useFloats)
+        {
+            if (!bs.Read(x)) return false;
+            if (!bs.Read(y)) return false;
+            if (!bs.Read(z)) return false;
+        }
+        else
+        {
+            if (!ReadFixedPoint(bs, 24, 10, x)) return false;
+            if (!ReadFixedPoint(bs, 24, 10, y)) return false;
+            if (!bs.Read(z)) return false;
+        }
+
+        return (x > -SYNC_POSITION_LIMIT && x < SYNC_POSITION_LIMIT &&
+                y > -SYNC_POSITION_LIMIT && y < SYNC_POSITION_LIMIT &&
+                z > -SYNC_POSITION_LIMIT && z < SYNC_POSITION_LIMIT);
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        float cx = ClampFloat(x, -SYNC_POSITION_LIMIT + 1.0f, SYNC_POSITION_LIMIT - 1.0f);
+        float cy = ClampFloat(y, -SYNC_POSITION_LIMIT + 1.0f, SYNC_POSITION_LIMIT - 1.0f);
+        float cz = ClampFloat(z, -SYNC_POSITION_LIMIT + 1.0f, SYNC_POSITION_LIMIT - 1.0f);
+
+        if (useFloats)
+        {
+            bs.Write(cx);
+            bs.Write(cy);
+            bs.Write(cz);
+        }
+        else
+        {
+            WriteFixedPoint(bs, 24, 10, cx);
+            WriteFixedPoint(bs, 24, 10, cy);
+            bs.Write(cz);
+        }
+    }
+};
+
+struct SPcPedRotationSync
+{
+    float rotation = 0.0f;
+
+    bool Read(NetBitStream& bs)
+    {
+        uint16_t raw = 0;
+        if (!bs.Read(raw)) return false;
+        rotation = (static_cast<float>(raw) / 65535.0f * TWO_PI) - PI;
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        float wrapped = WrapAngle(rotation);
+        float normalized = (wrapped + PI) / TWO_PI;
+        uint16_t raw = static_cast<uint16_t>(normalized * 65535.0f);
+        bs.Write(raw);
+    }
+};
+
+struct SPcCameraRotationSync
+{
+    float rotation = 0.0f;
+
+    bool Read(NetBitStream& bs)
+    {
+        rotation = ReadFloatAsBits(bs, 12, -PI, PI);
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        WriteFloatAsBits(bs, 12, -PI, PI, rotation, true);
+    }
+};
+
+struct SPcVelocitySync
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+
+    bool Read(NetBitStream& bs)
+    {
+        if (!bs.ReadBit())
+        {
+            x = y = z = 0.0f;
+            return true;
+        }
+
+        float modulus = 0.0f;
+        if (!bs.Read(modulus)) return false;
+
+        float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+        if (!bs.ReadNormVector(nx, ny, nz)) return false;
+
+        x = nx * modulus;
+        y = ny * modulus;
+        z = nz * modulus;
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        float modulus = std::sqrt(x * x + y * y + z * z);
+        if (modulus <= 0.0f)
+        {
+            bs.WriteBit(false);
+            return;
+        }
+
+        bs.WriteBit(true);
+        bs.Write(modulus);
+        bs.WriteNormVector(x / modulus, y / modulus, z / modulus);
+    }
+};
+
+struct SFullKeysyncSync
+{
+    struct
+    {
+        bool          bLeftShoulder1 : 1;
+        bool          bRightShoulder1 : 1;
+        bool          bButtonSquare : 1;
+        bool          bButtonCross : 1;
+        bool          bButtonCircle : 1;
+        bool          bButtonTriangle : 1;
+        bool          bShockButtonL : 1;
+        bool          bPedWalk : 1;
+        unsigned char ucButtonSquare;
+        unsigned char ucButtonCross;
+        short         sLeftStickX;
+        short         sLeftStickY;
+    } data{};
+
+    bool Read(NetBitStream& bs)
+    {
+        uint8_t keyBits = 0;
+        if (!bs.ReadBits(&keyBits, 8)) return false;
+        std::memcpy(&data, &keyBits, 1);
+
+        if (bs.ReadBit())
+        {
+            if (!bs.Read(data.ucButtonSquare)) return false;
+        }
+        else
+        {
+            data.ucButtonSquare = 0;
+        }
+
+        if (bs.ReadBit())
+        {
+            if (!bs.Read(data.ucButtonCross)) return false;
+        }
+        else
+        {
+            data.ucButtonCross = 0;
+        }
+
+        int8_t leftX = 0;
+        int8_t leftY = 0;
+        if (!bs.Read(leftX)) return false;
+        if (!bs.Read(leftY)) return false;
+
+        data.sLeftStickX = static_cast<short>(static_cast<float>(leftX) * 128.0f / 127.0f);
+        data.sLeftStickY = static_cast<short>(static_cast<float>(leftY) * 128.0f / 127.0f);
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        uint8_t keyBits = 0;
+        std::memcpy(&keyBits, &data, 1);
+        bs.WriteBits(&keyBits, 8);
+
+        if (data.ucButtonSquare >= 1 && data.ucButtonSquare <= 254)
+        {
+            bs.WriteBit(true);
+            bs.Write(data.ucButtonSquare);
+        }
+        else
+        {
+            bs.WriteBit(false);
+        }
+
+        if (data.ucButtonCross >= 1 && data.ucButtonCross <= 254)
+        {
+            bs.WriteBit(true);
+            bs.Write(data.ucButtonCross);
+        }
+        else
+        {
+            bs.WriteBit(false);
+        }
+
+        int8_t leftX = static_cast<int8_t>(static_cast<float>(data.sLeftStickX) * 127.0f / 128.0f);
+        int8_t leftY = static_cast<int8_t>(static_cast<float>(data.sLeftStickY) * 127.0f / 128.0f);
+        bs.Write(leftX);
+        bs.Write(leftY);
+    }
+};
+
+inline bool ReadFullKeysync(SControllerState& controller, NetBitStream& bs)
+{
+    SFullKeysyncSync keys;
+    if (!keys.Read(bs)) return false;
+
+    short sButtonSquare = keys.data.bButtonSquare ? 255 : 0;
+    short sButtonCross = keys.data.bButtonCross ? 255 : 0;
+
+    if (keys.data.ucButtonSquare != 0)
+        sButtonSquare = static_cast<short>(keys.data.ucButtonSquare);
+    if (keys.data.ucButtonCross != 0)
+        sButtonCross = static_cast<short>(keys.data.ucButtonCross);
+
+    controller.LeftShoulder1 = keys.data.bLeftShoulder1;
+    controller.RightShoulder1 = keys.data.bRightShoulder1;
+    controller.ButtonSquare = sButtonSquare;
+    controller.ButtonCross = sButtonCross;
+    controller.ButtonCircle = keys.data.bButtonCircle;
+    controller.ButtonTriangle = keys.data.bButtonTriangle;
+    controller.ShockButtonL = keys.data.bShockButtonL;
+    controller.m_bPedWalk = keys.data.bPedWalk;
+    controller.LeftStickX = keys.data.sLeftStickX;
+    controller.LeftStickY = keys.data.sLeftStickY;
+    return true;
+}
+
+inline void WriteFullKeysync(const SControllerState& controller, NetBitStream& bs)
+{
+    SFullKeysyncSync keys;
+    keys.data.bLeftShoulder1 = (controller.LeftShoulder1 != 0);
+    keys.data.bRightShoulder1 = (controller.RightShoulder1 != 0);
+    keys.data.bButtonSquare = (controller.ButtonSquare != 0);
+    keys.data.bButtonCross = (controller.ButtonCross != 0);
+    keys.data.bButtonCircle = (controller.ButtonCircle != 0);
+    keys.data.bButtonTriangle = (controller.ButtonTriangle != 0);
+    keys.data.bShockButtonL = (controller.ShockButtonL != 0);
+    keys.data.bPedWalk = (controller.m_bPedWalk != 0);
+    keys.data.ucButtonSquare = static_cast<unsigned char>(controller.ButtonSquare);
+    keys.data.ucButtonCross = static_cast<unsigned char>(controller.ButtonCross);
+    keys.data.sLeftStickX = controller.LeftStickX;
+    keys.data.sLeftStickY = controller.LeftStickY;
+    keys.Write(bs);
+}
+
+struct SPcWeaponSlotSync
+{
+    uint8_t slot = 0;
+
+    bool Read(NetBitStream& bs)
+    {
+        uint32_t raw = 0;
+        if (!ReadBitsToUInt(bs, raw, 4)) return false;
+        slot = static_cast<uint8_t>(raw & 0x0F);
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        WriteBitsFromUInt(bs, static_cast<uint32_t>(slot & 0x0F), 4);
+    }
+};
+
+struct SWeaponAmmoSync
+{
+    uint16_t totalAmmo = 0;
+    uint16_t ammoInClip = 0;
+
+    bool Read(NetBitStream& bs, bool syncTotalAmmo = true, bool syncAmmoInClip = true)
+    {
+        if (syncTotalAmmo && !bs.ReadCompressed(totalAmmo)) return false;
+        if (syncAmmoInClip && !bs.ReadCompressed(ammoInClip)) return false;
+        return true;
+    }
+
+    void Write(NetBitStream& bs, bool syncTotalAmmo = true, bool syncAmmoInClip = true) const
+    {
+        if (syncTotalAmmo) bs.WriteCompressed(totalAmmo);
+        if (syncAmmoInClip) bs.WriteCompressed(ammoInClip);
+    }
+};
+
+struct SWeaponAimSync
+{
+    float arm = 0.0f;
+    float originX = 0.0f;
+    float originY = 0.0f;
+    float originZ = 0.0f;
+    float targetX = 0.0f;
+    float targetY = 0.0f;
+    float targetZ = 0.0f;
+    float weaponRange = 0.0f;
+    bool full = true;
+
+    explicit SWeaponAimSync(float range = 0.0f, bool isFull = true)
+        : weaponRange(range), full(isFull)
+    {}
+
+    bool Read(NetBitStream& bs)
+    {
+        int16_t armRaw = 0;
+        if (!bs.Read(armRaw)) return false;
+        arm = (static_cast<float>(armRaw) * PI / 180.0f) / 90.0f;
+
+        if (full)
+        {
+            if (!bs.Read(originX)) return false;
+            if (!bs.Read(originY)) return false;
+            if (!bs.Read(originZ)) return false;
+
+            float dirX = 0.0f, dirY = 0.0f, dirZ = 0.0f;
+            if (!bs.ReadNormVector(dirX, dirZ, dirY)) return false;
+
+            targetX = originX + dirX * weaponRange;
+            targetY = originY + dirY * weaponRange;
+            targetZ = originZ + dirZ * weaponRange;
+        }
+
+        return true;
+    }
+
+    void Write(NetBitStream& bs) const
+    {
+        int16_t armRaw = static_cast<int16_t>(arm * 90.0f * 180.0f / PI);
+        bs.Write(armRaw);
+
+        if (full)
+        {
+            bs.Write(originX);
+            bs.Write(originY);
+            bs.Write(originZ);
+
+            float dirX = targetX - originX;
+            float dirY = targetY - originY;
+            float dirZ = targetZ - originZ;
+            float len = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+            if (len > 0.0f)
+            {
+                dirX /= len;
+                dirY /= len;
+                dirZ /= len;
+            }
+            bs.WriteNormVector(dirX, dirZ, dirY);
+        }
     }
 };
 

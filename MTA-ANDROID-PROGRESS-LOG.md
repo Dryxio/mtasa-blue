@@ -170,6 +170,8 @@
 | 2026-01-11 | 7f | Use CPed::Teleport (0x59DD90) instead of direct matrix writes |
 | 2026-01-11 | 7f | Added filter for invalid (0,0,0) sync positions |
 | 2026-01-11 | 7f | Remote players now teleport correctly and stay at their position |
+| 2026-01-12 | 7f | Added derived input fallback for remote animations (temporary) |
+| 2026-01-12 | 7f | Animation/heading mismatch identified; need PC keysync/heading rules |
 
 ---
 
@@ -678,4 +680,50 @@ Now that basic remote player rendering works:
 
 ---
 
-*Document updated: January 11, 2026 - Session 19: DEAD POSE FIXED! REMOTE PLAYERS FULLY WORKING!*
+## Session 21: Remote Animation Mismatch (January 12, 2026)
+
+**Current Issue:**
+- Remote player position sync is correct, but animation and facing are wrong.
+- Remote animation mirrors local movement or shows incorrect walk/run state.
+- Remote facing can be flipped (appears looking at local player).
+
+**Temporary Workaround:**
+- Derived input fallback to synthesize controller input from position delta.
+- Helps trigger animations but does not match correct heading/state.
+
+**Likely Root Cause:**
+- Android PURESYNC parsing does not read full keysync data.
+- Camera rotation and key flags are missing or mis-read.
+- Derived input is guessing instead of using real controller state.
+
+**Next Steps:**
+1. Port PC `ReadPlayerPuresync` + `ReadFullKeysync` into Android packet handler.
+2. Store controller state and camera rotation in RemoteSyncData.
+3. Drive CPad hooks from keysync and remove derived input fallback.
+
+---
+
+*Document updated: January 12, 2026 - Session 21: Remote animation mismatch*
+
+## Session 22: Puresync Regression After Bitstream Port (January 13, 2026)
+
+**Current Issue:**
+- Remote players no longer visible after PC puresync/bitstream changes.
+- Sync positions decode as (0,0,0); players get auto-created then removed as stale.
+- PURESYNC packets arrive (31/41 bytes) but parsing is still misaligned.
+
+**Changes Made (This Session):**
+1. Ported PC puresync read order (latency, keysync, flags, compressed position/rotation/velocity).
+2. Added 17-bit ElementID parsing for player/vehicle packets.
+3. Switched NetBitStream norm vector/quaternion to float form (matches net-android server).
+4. Updated NetBitStream compressed int format to match net-android server behavior.
+
+**Result:**
+- Regression persists; remote positions still decode as (0,0,0).
+
+**Next Steps:**
+1. Compare bit offsets during client puresync parsing with server write order.
+2. Verify remaining mismatches (compressed floats, camera orientation block).
+3. Add targeted logging for bit offsets and values to locate alignment break.
+
+---

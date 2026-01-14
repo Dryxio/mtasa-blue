@@ -283,6 +283,7 @@ After successful Phase 6 integration:
 
 1. **Phase 7: Multiplayer Logic**
    - Implement player synchronization
+   - Port MTA PC remote animation/heading rules (replace derived-input fallback)
    - Port MTA network protocol
    - Add server browser
    - Implement resource/Lua system

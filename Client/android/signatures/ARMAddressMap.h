@@ -437,6 +437,7 @@ namespace MTA::Android::ARM
         constexpr uint32_t CPed_FlagToDestroyWhenNextProcessed = 0x59E484;
         constexpr uint32_t CPed_ReplaceWeaponForScriptedCutscene = 0x59BC6C;
         constexpr uint32_t CPed_Teleport                      = 0x59DD90;  // CPed::Teleport(CVector, bool) - from nm -D
+        constexpr uint32_t CPed_SetMoveState                  = 0x596CAC;
 
         //---------------------------------------------------------------------
         // CPlaceable / CEntity

@@ -1,8 +1,8 @@
 # MTA:SA Android Port - Project Summary
 
 > Document created: January 9, 2026
-> Last updated: January 11, 2026 (Session 20 - CPed::Teleport fix, position sync stable)
-> Status: **Phase 7f COMPLETE - Remote players fully working with stable position sync!**
+> Last updated: January 13, 2026 (Session 22 - PC puresync/bitstream port regression)
+> Status: **Phase 7f IN PROGRESS - Regression: remote players not visible after puresync/bitstream changes.**
 
 **Related Documentation:**
 - [Progress Log](MTA-ANDROID-PROGRESS-LOG.md) - Historical session logs and daily progress
@@ -19,7 +19,7 @@ This document summarizes the progress on porting MTA:SA (Multi Theft Auto: San A
 | GTA SA Definitive Edition | Unreal Engine 4 | Not feasible (95%+ rewrite) | Rejected |
 | **GTA SA Android** | **RenderWare** | **Feasible (40-60% rewrite)** | **In Progress** |
 
-**Current Status**: Phases 1-7e complete, Phase 7f - **REMOTE PLAYERS WORKING! Both devices see each other correctly!**
+**Current Status**: Phases 1-7e complete, Phase 7f - **Regression: remote players no longer visible after PC puresync/bitstream changes; sync positions read as (0,0,0).**
 
 ```
 Build Status:    APK builds successfully (ARM64 + ARM32)
@@ -34,7 +34,45 @@ Server:          37.59.101.35:22004 with net_android.so (as net.so)
 Two-Way Sync:    Both clients sending AND receiving PURESYNC packets
 Auto-Create:     Players auto-created on first sync reception
 Player Count:    "Remote players: 1" shown on both devices!
-REMOTE PLAYER:   *** FULLY WORKING! *** Both devices see each other standing/moving!
+REMOTE PLAYER:   Regression after PC puresync port; remote positions decode as (0,0,0); players not visible.
+
+=== SESSION 22 (January 13, 2026) ===
+PURESYNC REGRESSION AFTER BITSTREAM PORT
+
+  CURRENT ISSUE:
+    - Remote players not visible; sync positions decode as (0,0,0)
+    - Player manager auto-creates/removes remote players due to invalid positions
+    - PURESYNC packets arrive but parsing is still misaligned
+
+  CHANGES MADE (LATEST):
+    - Ported PC puresync parsing (keysync, flags, compressed position/rotation/velocity)
+    - Added ElementID 17-bit parsing for player/vehicle packets
+    - Updated NetBitStream norm vector/quaternion to float form
+    - Updated NetBitStream compressed int format to match server net-android
+
+  NEXT STEPS:
+    1. Verify remaining bitstream mismatches vs net-android (compressed types + bit order).
+    2. Add bit-offset logging during puresync parsing to locate misalignment.
+    3. Validate server payload size and fields (latency, keysync, cam orientation) against client reads.
+
+  CURRENT ISSUE:
+    - Remote player position updates are correct
+    - Animation/heading are incorrect (mirrors local movement or wrong facing)
+    - Walk/run state mismatches (remote walking shows as running, wrong rotation)
+
+  TEMPORARY WORKAROUND:
+    - Derived input fallback synthesizes controller input from position delta
+    - Helps trigger animations but produces incorrect heading and state
+
+  ROOT CAUSE (LIKELY):
+    - Android PURESYNC parsing does not read full keysync
+    - Camera rotation and key flags are missing or mis-read
+    - Derived input is guessing from movement only, not real input state
+
+  NEXT STEPS (TARGET FIX):
+    1. Port PC ReadPlayerPuresync + ReadFullKeysync into Android packet handler
+    2. Store controller state and camera rotation in RemoteSyncData
+    3. Drive CPadHooks from keysync (remove derived input hack)
 
 === SESSION 20 (January 11, 2026) ===
 CPed::Teleport FIX - Remote player position now stable!
@@ -317,7 +355,7 @@ REMOTE PLAYER IS NOW VISIBLE!!!
 | **Phase 7c** | Custom Server Module | **COMPLETE** | net_android.so integrated with MTA server |
 | **Phase 7d** | Position Sync | **COMPLETE** | CPlayerSync ready, server timeout fixed, local sync working |
 | **Phase 7e** | Multi-Client Sync | **COMPLETE** | CRemotePlayer, CPlayerManager, TWO clients connected! |
-| **Phase 7f** | Remote Player Render | **COMPLETE** | Both devices see each other standing and moving! |
+| **Phase 7f** | Remote Player Render | **IN PROGRESS** | Players visible; position sync stable; animation/heading incorrect |
 
 ---
 
@@ -461,8 +499,8 @@ grep "CPlayerPed" "Client/android/reference/samp-android-reference/dumps_libGTAS
 
 ## 7. Next Steps
 
-### Phase 7f COMPLETE! Remote Players Working!
-ALL VISUAL ISSUES FIXED! Both devices see each other as standing players.
+### Phase 7f Status: Remote Players Visible, Animation Pending
+Players are visible and position sync is stable, but animation/heading is incorrect.
 
 ### Completed Investigation Steps
 - [x] Remote player ped is VISIBLE on Device 1
@@ -474,12 +512,13 @@ ALL VISUAL ISSUES FIXED! Both devices see each other as standing players.
 - [x] GREEN TRIANGLE FIXED (spawn delay solution)
 - [x] Device 2 sees Device 1's body correctly
 - [x] DEAD PED POSE FIXED (SA-MP ped flags)
-- [x] Both devices see standing players that move correctly
+- [x] Both devices see standing players; position sync stable
+- [ ] Remote animation/heading correct (pending PC keysync port)
 
 ### Next: Phase 7g - Enhanced Multiplayer Features
 Now that basic remote player rendering works, next priorities:
 
-**Priority 1: CPad Hooks for Remote Player Input (50% Complete)**
+**Priority 1: CPad Hooks for Remote Player Input (In Progress)**
 
 SA-MP hooks CPad functions to provide input for remote players.
 This enables walking/running/jumping animations for remote players.
@@ -490,9 +529,9 @@ This enables walking/running/jumping animations for remote players.
 | ARM64 addresses mapped | ✅ Complete | 20+ CPad functions |
 | Key storage in RemoteSyncData | ✅ Added | leftStickX/Y, keyFlags |
 | Slot management (2-31) | ✅ Working | For PlayerInFocus routing |
-| Hook installation | ⚠️ **DISABLED** | Caused dead pose regression |
-| Key extraction from packets | ⚠️ Workaround | Currently derived from velocity |
-| ProcessControl hook | ❌ Incomplete | Missing ped→player lookup |
+| Hook installation | ✅ Enabled | Dead pose regression resolved |
+| Key extraction from packets | ❌ Missing | Needs PC ReadFullKeysync port |
+| ProcessControl hook | ⚠️ In progress | Needs real keysync data for correct anim |
 
 **Files:**
 - `Client/android/multiplayer/CPadHooks.h` - Full implementation (disabled)
@@ -571,7 +610,7 @@ cd /home/ubuntu/mtasa/dev && pkill -f mta-server64 && nohup ./mta-server64 > /tm
 
 ---
 
-*Document updated: January 11, 2026 (Session 19 - DEAD POSE FIXED! REMOTE PLAYERS FULLY WORKING!)*
+*Document updated: January 13, 2026 (Session 22 - Puresync regression after bitstream port)*
 *For historical progress, see [MTA-ANDROID-PROGRESS-LOG.md](MTA-ANDROID-PROGRESS-LOG.md)*
 *For completed phase details, see [MTA-ANDROID-COMPLETED-PHASES.md](MTA-ANDROID-COMPLETED-PHASES.md)*
 *For build, inject, and deploy instructions, see [Client/android/README.md](Client/android/README.md)*

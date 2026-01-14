@@ -339,18 +339,15 @@ inline bool CPlayerManager::Initialize(uintptr_t gameBase)
     m_lastProcessTime = GetTimeMs();
     m_lastStaleCheckTime = GetTimeMs();
 
-    // CPadHooks disabled for now - causes dead ped pose regression
-    // TODO: Debug and fix CPadHooks before re-enabling
-    // auto& padHooks = CPadHooks::GetInstance();
-    // if (!padHooks.Initialize(gameBase))
-    // {
-    //     PMGR_LOGW("CPadHooks initialization failed - remote animations may not work");
-    // }
-    // else
-    // {
-    //     PMGR_LOGI("CPadHooks initialized successfully");
-    // }
-    PMGR_LOGI("CPadHooks disabled - will be enabled after debugging");
+    auto& padHooks = CPadHooks::GetInstance();
+    if (!padHooks.Initialize(gameBase))
+    {
+        PMGR_LOGW("CPadHooks initialization failed - continuing without pad hooks");
+    }
+    else
+    {
+        PMGR_LOGI("CPadHooks enabled");
+    }
 
     PMGR_LOGI("Player manager initialized, game base: 0x%lx", (unsigned long)gameBase);
     return true;
@@ -453,6 +450,13 @@ inline void CPlayerManager::RemovePlayer(uint32_t playerId)
         m_slotToPlayer.erase(slot);
         m_playerToSlot.erase(slotIt);
         PMGR_LOGD("Freed slot %d for player %u", slot, playerId);
+
+        auto& padHooks = CPadHooks::GetInstance();
+        if (padHooks.IsInitialized())
+        {
+            padHooks.SetRemotePlayerPed(slot, 0);
+            padHooks.SetRemotePlayerKeys(slot, 128, 128, 0);
+        }
     }
 
     m_players.erase(it);
@@ -582,6 +586,20 @@ inline void CPlayerManager::UpdatePlayerSync(uint32_t playerId, const RemoteSync
         std::string autoNickname = "Player" + std::to_string(playerId);
         auto player = std::make_unique<CRemotePlayer>(playerId, autoNickname);
 
+        // Allocate a slot for CPad hooks
+        uint8_t slot = AllocateSlot();
+        if (slot == 0)
+        {
+            PMGR_LOGE("No slots available for auto-created player %u (max %d remote players)",
+                      playerId, MAX_REMOTE_SLOT - MIN_REMOTE_SLOT + 1);
+        }
+        else
+        {
+            m_playerToSlot[playerId] = slot;
+            m_slotToPlayer[slot] = playerId;
+            PMGR_LOGI("Auto-created player %u assigned slot %d", playerId, slot);
+        }
+
         // Only spawn if we have valid position AND game is ready AND local player exists
         if (hasValidPosition && canSpawnRemote)
         {
@@ -635,10 +653,12 @@ inline void CPlayerManager::UpdatePlayerSync(uint32_t playerId, const RemoteSync
         auto& padHooks = CPadHooks::GetInstance();
         if (padHooks.IsInitialized())
         {
-            padHooks.SetRemotePlayerKeys(slot,
-                                         data.controllerLeftStickX,
-                                         data.controllerLeftStickY,
-                                         data.keyFlags);
+            const RemoteSyncData& padData = it->second->GetSyncData();
+            padHooks.SetRemotePlayerKeys(
+                slot,
+                padData.controllerLeftStickX,
+                padData.controllerLeftStickY,
+                padData.keyFlags);
         }
     }
 }
@@ -686,9 +706,8 @@ inline void CPlayerManager::Process()
 
     uint64_t now = GetTimeMs();
 
-    // CPadHooks disabled - skip PlayerInFocus manipulation
-    // auto& padHooks = CPadHooks::GetInstance();
-    // bool padHooksReady = padHooks.IsInitialized();
+    auto& padHooks = CPadHooks::GetInstance();
+    const bool padHooksReady = padHooks.IsInitialized();
 
     // Lock and process all players
     {
@@ -696,7 +715,17 @@ inline void CPlayerManager::Process()
 
         for (auto& pair : m_players)
         {
-            pair.second->Update(now);
+            auto* player = pair.second.get();
+            player->Update(now);
+
+            if (padHooksReady)
+            {
+                auto slotIt = m_playerToSlot.find(pair.first);
+                if (slotIt != m_playerToSlot.end())
+                {
+                    padHooks.SetRemotePlayerPed(slotIt->second, player->GetPedPtr());
+                }
+            }
         }
     }
 

@@ -598,15 +598,141 @@ namespace MTA::Android::Signatures
     {
         auto& mapper = AddressMapper::Instance();
 
+        // Signature patterns extracted from SA-MP 2.10 libGTASA.so
+#if defined(__aarch64__)
+        const char* sig_CEntity_Render =
+            "ff 43 01 d1 f8 5f 01 a9 f6 57 02 a9 f4 4f 03 a9 "
+            "fd 7b 04 a9 fd 03 01 91 f3 03 00 aa 68 12 40 f9";
+        const char* sig_CGame_Process =
+            "e8 0f 1b fc f9 07 00 f9 f8 5f 01 a9 f6 57 02 a9 "
+            "f4 4f 03 a9 fd 7b 04 a9 fd 03 01 91 2c 29 f5 97";
+        const char* sig_CPed_ProcessControl =
+            "ff 03 02 d1 ed 33 01 6d eb 2b 02 6d e9 23 03 6d "
+            "f7 23 00 f9 f6 57 05 a9 f4 4f 06 a9 fd 7b 07 a9 "
+            "fd c3 01 91 f3 03 00 aa 60 62 06 91 d1 3e f2 97 "
+            "68 22 47 b9 1f 05 00 71 68 07 00 54 74 72 a3 39 "
+            "68 16 14 8b 08 31 47 b9 1f 49 00 71 c1 06 00 54";
+        const char* sig_CAutomobile_ProcessControl =
+            "ff 83 05 d1 ef 3b 0c 6d ed 33 0d 6d eb 2b 0e 6d "
+            "e9 23 0f 6d fc 6f 10 a9 fa 67 11 a9 f8 5f 12 a9 "
+            "f6 57 13 a9 f4 4f 14 a9 fd 7b 15 a9 fd 43 05 91 "
+            "f3 03 00 aa 68 b6 42 f9 15 e5 79 d3 b5 c3 16 b8";
+        const char* sig_CWeapon_Fire =
+            "ff 43 02 d1 e9 23 02 6d fc 6f 03 a9 fa 67 04 a9 "
+            "f8 5f 05 a9 f6 57 06 a9 f4 4f 07 a9 fd 7b 08 a9 "
+            "fd 03 02 91 48 33 93 52 28 e3 a7 72 f3 03 00 aa "
+            "ff 0b 00 f9 e8 1b 00 b9 60 02 40 b9 f5 03 01 aa "
+            "e1 03 00 32 f9 03 06 aa f7 03 05 aa f6 03 04 aa "
+            "f8 03 03 aa fa 03 02 aa 61 77 ec 97 f4 03 00 aa";
+        const char* sig_CCamera_Process =
+            "ff 83 05 d1 ef 3b 0c 6d ed 33 0d 6d eb 2b 0e 6d "
+            "e9 23 0f 6d fc 6f 10 a9 fa 67 11 a9 f8 5f 12 a9 "
+            "f6 57 13 a9 f4 4f 14 a9 fd 7b 15 a9 fd 43 05 91 "
+            "f3 03 00 aa cd bc f5 97 e8 1b 09 32 e8 6f 00 b9";
+        const char* sig_CStreaming_RequestModel =
+            "f8 5f bc a9 f6 57 01 a9 f4 4f 02 a9 fd 7b 03 a9 "
+            "fd c3 00 91 d6 25 00 b0 d6 ea 45 f9 88 02 80 52";
+        const char* sig_CWorld_ProcessLineOfSight =
+            "ff c3 04 d1 ea 5b 00 fd e9 23 0c 6d fc 6f 0d a9 "
+            "fa 67 0e a9 f8 5f 0f a9 f6 57 10 a9 f4 4f 11 a9";
+        const char* sig_CPlayerPed_SetupPlayerPed =
+            "ea 0f 1b fc e9 23 01 6d f6 57 02 a9 f4 4f 03 a9 "
+            "fd 7b 04 a9 fd 03 01 91 f4 03 00 2a 00 33 81 52";
+        const char* sig_CPlayerPed_SetInitialState =
+            "f7 0f 1c f8 f6 57 01 a9 f4 4f 02 a9 fd 7b 03 a9 "
+            "fd c3 00 91 f4 03 01 2a f3 03 00 aa d1 a6 f1 97";
+        const char* sig_CPlayerPed_DeactivatePlayerPed =
+            "69 14 00 b0 29 d5 43 f9 08 3b 80 52 08 7c 28 9b "
+            "20 69 68 f8 53 b5 f1 17";
+        const char* sig_CPlayerPed_ReactivatePlayerPed =
+            "69 14 00 b0 29 d5 43 f9 08 3b 80 52 08 7c 28 9b "
+            "20 69 68 f8 1d a8 f1 17";
+        const char* sig_CPed_ClearWeapons =
+            "f3 0f 1e f8 fd 7b 01 a9 fd 43 00 91 01 00 80 12 "
+            "f3 03 00 aa 27 17 00 94 e0 03 13 aa 78 17 00 94";
+        const char* sig_CPed_SetModelIndex =
+            "f4 4f be a9 fd 7b 01 a9 fd 43 00 91 f3 03 00 aa "
+            "68 16 40 f9 08 01 79 b2 68 16 00 f9 af 6d f2 97";
+        const char* sig_CPed_GetWeaponSkill =
+            "e8 0f 1d fc f5 07 00 f9 f4 4f 01 a9 fd 7b 02 a9 "
+            "fd 83 00 91 f3 03 01 2a 68 5a 00 51 1f 29 00 71";
+        const char* sig_CRenderer_RenderOneNonRoad =
+            "f4 4f be a9 fd 7b 01 a9 fd 43 00 91 f3 03 00 aa "
+            "68 6a 41 39 08 09 00 12 1f 0d 00 71 e1 00 00 54";
+        const char* sig_CEntity_CreateRwObject =
+            "f5 0f 1d f8 f4 4f 01 a9 fd 7b 02 a9 fd 83 00 91 "
+            "f3 03 00 aa 68 16 40 f9 a8 0e 38 36 2a 1c 00 b0";
+        const char* sig_CEntity_DeleteRwObject =
+            "f5 0f 1d f8 f4 4f 01 a9 fd 7b 02 a9 fd 83 00 91 "
+            "f3 03 00 aa 74 12 40 f9 94 01 00 b4 88 02 40 39";
+#else
+        const char* sig_CEntity_Render =
+            "f0 b5 03 af 2d e9 00 07 82 b0 80 46 d8 f8 18 00 "
+            "00 28 7a d0 00 78 01 28 0d d1 40 46 aa f5 12 e8";
+        const char* sig_CGame_Process =
+            "f0 b5 03 af 4d f8 04 bd 2d ed 02 8b 9d f5 b0 e8 "
+            "a4 f5 e0 eb a4 f5 0a ea df f8 7c 03 78 44 00 68";
+        const char* sig_CPed_ProcessControl =
+            "f0 b5 03 af 2d e9 00 0f 81 b0 2d ed 04 8b 8e b0 "
+            "04 46 04 f5 9e 70 f6 f4 f2 e8 d4 f8 9c 05 01 28";
+        const char* sig_CAutomobile_ProcessControl =
+            "f0 b5 03 af 2d e9 00 0f 81 b0 2d ed 10 8b b8 b0 "
+            "04 46 d4 f8 30 04 c0 f3 40 65 20 46 37 95 40 f4 "
+            "88 ec c6 6a 00 23 94 f8 7c 08 d4 f8 2c 14 d4 f8";
+        const char* sig_CWeapon_Fire =
+            "f0 b5 03 af 2d e9 00 0f 81 b0 2d ed 04 8b 8e b0 "
+            "81 46 49 f6 9a 10 4f f0 00 0b c3 f6 19 70 cd e9";
+        const char* sig_CCamera_Process =
+            "f0 b5 03 af 2d e9 00 0f 81 b0 2d ed 10 8b ae b0 "
+            "04 46 bd f5 fa ec 4f f0 7e 50 04 f1 04 0a 19 90 "
+            "00 21 60 69 84 f8 28 10 51 46 00 28 18 bf 00 f1";
+        const char* sig_CStreaming_RequestModel =
+            "f0 b5 03 af 2d e9 00 07 82 46 83 48 0a eb 8a 06 "
+            "0c 46 78 44 00 68 00 eb 86 09 4d 46 15 f8 10 0f";
+        const char* sig_CWorld_ProcessLineOfSight =
+            "f0 b5 03 af 2d e9 00 0f 81 b0 2d ed 0c 8b a0 b0 "
+            "04 46 df f8 c0 0d 0e 46 98 46 78 44 4f f6 ff 71";
+        const char* sig_CPlayerPed_SetupPlayerPed =
+            "f0 b5 03 af 4d f8 04 bd 2d ed 06 8b 04 46 40 f2 "
+            "ac 70 c6 f4 44 ec 21 46 00 22 05 46 dc f4 70 e9";
+        const char* sig_CPlayerPed_SetInitialState =
+            "f0 b5 03 af 2d e9 00 07 88 46 04 46 d7 f4 98 e9 "
+            "4d 48 4f f0 7e 51 a1 46 78 44 00 68 01 60 59 f8";
+        const char* sig_CPlayerPed_DeactivatePlayerPed =
+            "04 49 4f f4 ca 72 50 43 79 44 09 68 08 58 da f4 "
+            "81 bd 00 bf e0 48 1b 00";
+        const char* sig_CPlayerPed_ReactivatePlayerPed =
+            "04 49 4f f4 ca 72 50 43 79 44 09 68 08 58 d7 f4 "
+            "73 bc 00 bf c8 48 1b 00";
+        const char* sig_CPed_ClearWeapons =
+            "d0 b5 02 af 4f f0 ff 31 04 46 fd f4 6c e9 20 46 "
+            "f2 f4 36 ef 04 f2 a4 50 ef f4 60 ea 04 f5 b8 60";
+        const char* sig_CPed_SetModelIndex =
+            "b0 b5 02 af 04 46 e0 69 40 f0 80 00 e0 61 20 46 "
+            "01 f5 70 e9 a0 69 fc f4 de e9 a0 69 04 f2 94 41";
+        const char* sig_CPed_GetWeaponSkill =
+            "f0 b5 03 af 4d f8 04 8d 0c 46 a4 f1 16 01 0a 29 "
+            "32 d8 d0 f8 9c 15 01 29 30 d8 20 46 f7 f4 5e e9";
+        const char* sig_CRenderer_RenderOneNonRoad =
+            "f0 b5 03 af 4d f8 04 bd 04 46 94 f8 3a 00 00 f0 "
+            "07 00 03 28 04 bf d4 f8 4c 04 32 28 64 d0 20 68";
+        const char* sig_CEntity_CreateRwObject =
+            "f0 b5 03 af 2d e9 00 0b 04 46 26 46 56 f8 1c 0f "
+            "10 f0 80 0f 00 f0 a1 80 51 49 80 05 b4 f9 26 20";
+        const char* sig_CEntity_DeleteRwObject =
+            "f0 b5 03 af 4d f8 04 bd 04 46 a5 69 65 b1 28 78 "
+            "02 28 0c d0 01 28 1c d1 28 46 6e 68 9e f5 ca eb";
+#endif
+
         // =====================================================================
         // Core Game Functions
         // =====================================================================
 
         // CEntity::Render - Main entity rendering
-        mapper.Register("CEntity::Render", 0x534310);
+        mapper.Register("CEntity::Render", 0x534310, sig_CEntity_Render);
 
         // CGame::Process - Main game loop
-        mapper.Register("CGame::Process", 0x53BEE0);
+        mapper.Register("CGame::Process", 0x53BEE0, sig_CGame_Process);
 
         // CGame::Initialise - Game initialization
         mapper.Register("CGame::Initialise", 0x5BF3A0);
@@ -616,7 +742,7 @@ namespace MTA::Android::Signatures
         // =====================================================================
 
         // CAutomobile::ProcessControl - Vehicle physics/control
-        mapper.Register("CAutomobile::ProcessControl", 0x6B1880);
+        mapper.Register("CAutomobile::ProcessControl", 0x6B1880, sig_CAutomobile_ProcessControl);
 
         // CVehicle::BurstTyre - Tire burst handling
         mapper.Register("CVehicle::BurstTyre", 0x6A32B0);
@@ -632,10 +758,31 @@ namespace MTA::Android::Signatures
         // =====================================================================
 
         // CPed::ProcessControl - Ped AI/physics
-        mapper.Register("CPed::ProcessControl", 0x60EA90);
+        mapper.Register("CPed::ProcessControl", 0x60EA90, sig_CPed_ProcessControl);
 
         // CPlayerPed::ProcessControl - Player-specific control
         mapper.Register("CPlayerPed::ProcessControl", 0x60EA90);
+
+        // CPlayerPed::SetupPlayerPed - player initialization
+        mapper.Register("CPlayerPed::SetupPlayerPed", 0x60D790, sig_CPlayerPed_SetupPlayerPed);
+
+        // CPlayerPed::SetInitialState - initial ped state setup
+        mapper.Register("CPlayerPed::SetInitialState", 0x60CD20, sig_CPlayerPed_SetInitialState);
+
+        // CPlayerPed::DeactivatePlayerPed - temporary disable
+        mapper.Register("CPlayerPed::DeactivatePlayerPed", 0x609520, sig_CPlayerPed_DeactivatePlayerPed);
+
+        // CPlayerPed::ReactivatePlayerPed - restore from deactivate
+        mapper.Register("CPlayerPed::ReactivatePlayerPed", 0x609540, sig_CPlayerPed_ReactivatePlayerPed);
+
+        // CPed::ClearWeapons - remove ped weapons
+        mapper.Register("CPed::ClearWeapons", 0x5E6320, sig_CPed_ClearWeapons);
+
+        // CPed::SetModelIndex - change ped model
+        mapper.Register("CPed::SetModelIndex", 0x5E4880, sig_CPed_SetModelIndex);
+
+        // CPed::GetWeaponSkill - weapon skill lookup
+        mapper.Register("CPed::GetWeaponSkill", 0x5E3B60, sig_CPed_GetWeaponSkill);
 
         // CPed::DoFootLanded - Footstep detection
         mapper.Register("CPed::DoFootLanded", 0x5E3D60);
@@ -648,7 +795,7 @@ namespace MTA::Android::Signatures
         mapper.Register("CVisibilityPlugins::RenderWeaponPedsForPC", 0x733080);
 
         // CRenderer::RenderOneNonRoad - Non-road entity rendering
-        mapper.Register("CRenderer::RenderOneNonRoad", 0x553260);
+        mapper.Register("CRenderer::RenderOneNonRoad", 0x553260, sig_CRenderer_RenderOneNonRoad);
 
         // =====================================================================
         // Collision Functions
@@ -658,7 +805,7 @@ namespace MTA::Android::Signatures
         mapper.Register("CPhysical::ProcessCollision", 0x54DFB0);
 
         // CWorld::ProcessLineOfSight
-        mapper.Register("CWorld::ProcessLineOfSight", 0x56BA00);
+        mapper.Register("CWorld::ProcessLineOfSight", 0x56BA00, sig_CWorld_ProcessLineOfSight);
 
         // =====================================================================
         // Animation Functions
@@ -675,7 +822,7 @@ namespace MTA::Android::Signatures
         // =====================================================================
 
         // CCamera::Process - Camera update
-        mapper.Register("CCamera::Process", 0x52B730);
+        mapper.Register("CCamera::Process", 0x52B730, sig_CCamera_Process);
 
         // CCamera::CamControl - Camera control logic
         mapper.Register("CCamera::CamControl", 0x527FA0);
@@ -692,10 +839,20 @@ namespace MTA::Android::Signatures
         // =====================================================================
 
         // CStreaming::RequestModel
-        mapper.Register("CStreaming::RequestModel", 0x4087E0);
+        mapper.Register("CStreaming::RequestModel", 0x4087E0, sig_CStreaming_RequestModel);
 
         // CStreaming::LoadAllRequestedModels
         mapper.Register("CStreaming::LoadAllRequestedModels", 0x40EA10);
+
+        // =====================================================================
+        // RenderWare Entity Functions
+        // =====================================================================
+
+        // CEntity::CreateRwObject - build RW object for entity
+        mapper.Register("CEntity::CreateRwObject", 0x533D30, sig_CEntity_CreateRwObject);
+
+        // CEntity::DeleteRwObject - destroy RW object for entity
+        mapper.Register("CEntity::DeleteRwObject", 0x534030, sig_CEntity_DeleteRwObject);
 
         // =====================================================================
         // Task Functions (for multiplayer sync)
@@ -706,6 +863,13 @@ namespace MTA::Android::Signatures
 
         // CTaskManager::GetActiveTask
         mapper.Register("CTaskManager::GetActiveTask", 0x681720);
+
+        // =====================================================================
+        // Weapon Functions
+        // =====================================================================
+
+        // CWeapon::Fire - Core weapon firing path
+        mapper.Register("CWeapon::Fire", 0x742300, sig_CWeapon_Fire);
 
         // Note: Add more signatures as needed during hook migration
         // Each signature should be verified against GTA-Reversed

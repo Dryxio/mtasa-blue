@@ -17,6 +17,13 @@ Phase 2 focuses on mapping x86 Windows addresses to ARM Android addresses using 
 | **MTA Hooks** | 400+ hooks extracted from multiplayer_sa |
 | **Address Database** | Created with 200+ categorized entries |
 
+### Recent Updates
+
+- Re-enabled CPad hooks with proper remote ped slot mapping; remote animation no longer mirrors local movement.
+- Verified dead pose regression is resolved with hooks enabled.
+- Added derived input fallback to drive remote animations; current orientation/heading still incorrect.
+- Next step: port MTA PC remote anim/heading rules and full keysync parsing (CNetAPI::ReadPlayerPuresync/ReadFullKeysync) into Android to replace the derived-input hack.
+
 ---
 
 ## Completed Tasks
@@ -106,9 +113,38 @@ File: `Client/android/signatures/AddressDatabase.h`
 
 ---
 
+### 4. Critical Hook Signatures (ARM32/ARM64) ✅
+
+Signature patterns have been added for the top critical hooks using SA-MP 2.10
+`libGTASA.so` references for both ARM32 and ARM64.
+
+**Hooks covered:**
+- CEntity::Render
+- CGame::Process
+- CPed::ProcessControl
+- CAutomobile::ProcessControl
+- CWeapon::Fire
+- CCamera::Process
+- CStreaming::RequestModel
+- CWorld::ProcessLineOfSight
+- CPlayerPed::SetupPlayerPed
+- CPlayerPed::SetInitialState
+- CPlayerPed::DeactivatePlayerPed
+- CPlayerPed::ReactivatePlayerPed
+- CPed::ClearWeapons
+- CPed::SetModelIndex
+- CPed::GetWeaponSkill
+- CRenderer::RenderOneNonRoad
+- CEntity::CreateRwObject
+- CEntity::DeleteRwObject
+
+**Implementation:** `Client/android/signatures/SignatureScanner.h`
+
+---
+
 ## In Progress
 
-### 4. Signature Pattern Generation
+### 4. Signature Pattern Generation (Remaining)
 
 For ARM address resolution, we need byte patterns. These can be derived from:
 
@@ -135,7 +171,7 @@ For ARM address resolution, we need byte patterns. These can be derived from:
 ## Next Steps
 
 ### Immediate (Today)
-1. Generate signature patterns for top 20 critical hooks
+1. Expand signatures beyond the first critical set (remaining top 20 hooks)
 2. Cross-reference with GTA-Reversed source for validation
 3. Test pattern matching approach
 
