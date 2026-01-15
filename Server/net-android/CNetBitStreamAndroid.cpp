@@ -244,6 +244,16 @@ void CNetBitStreamAndroid::WriteBits(const char* input, unsigned int numbits)
     if (numbits == 0)
         return;
 
+    // Validate input pointer before dereferencing
+    uintptr_t inputAddr = reinterpret_cast<uintptr_t>(input);
+    if (inputAddr < 0x10000 || inputAddr > 0x7fffffffffff)
+    {
+        printf("[bitstream] WriteBits: ERROR - invalid input pointer 0x%lx, skipping %u bits\n",
+               (unsigned long)inputAddr, numbits);
+        fflush(stdout);
+        return;
+    }
+
     EnsureCapacity(numbits);
 
     // Fast path: byte-aligned write
@@ -449,9 +459,13 @@ bool CNetBitStreamAndroid::Read(char* output, int numberOfBytes)
         return true;
     }
     bool result = ReadBits(output, numberOfBytes * 8);
-    printf("[bitstream]   -> result=%s, first bytes: ", result ? "true" : "false");
-    for (int i = 0; i < std::min(numberOfBytes, 16); i++)
-        printf("%02X ", (unsigned char)output[i]);
+    printf("[bitstream]   -> result=%s", result ? "true" : "false");
+    if (result)
+    {
+        printf(", first bytes: ");
+        for (int i = 0; i < std::min(numberOfBytes, 16); i++)
+            printf("%02X ", (unsigned char)output[i]);
+    }
     printf("\n");
     fflush(stdout);
     return result;

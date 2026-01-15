@@ -992,6 +992,11 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
 
     SendRawPacket(joinedPacket, offset, destAddr);
     NET_LOG("-> Sent JOINED_GAME (player ID: %d)", playerIndex);
+
+    // Set elementId so sync packets can be relayed
+    // Use gamePlayerId as the elementId (they map 1:1 for Android clients)
+    client.elementId = client.gamePlayerId;
+    NET_LOG("-> Set elementId: %u", client.elementId);
 }
 
 void CNetServerAndroid::SendPlayerSpawn(ClientConnection& newClient)
