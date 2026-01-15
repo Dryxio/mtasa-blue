@@ -1083,3 +1083,83 @@ Now that basic remote player rendering works:
 ---
 
 *Document updated: January 14, 2026 - Session 34: Sync Bypass ElementID Prepend + Relay Validation*
+
+---
+
+## Session 35: Handshake vs JOIN_COMPLETE Timeout (January 14, 2026)
+
+**Goal:** Validate handshake and JOIN flow after server restart and sync relay changes.
+
+**Observations:**
+- Device A completes RakNet handshake, receives MOD_NAME, sends JOINDATA, then **times out waiting for JOIN_COMPLETE**.
+- Device B repeatedly times out at **handshake reply 1** (OPEN_CONNECTION_REPLY never received).
+- Server log shows only one client completing JOINDATA; **no JOIN_COMPLETE/JOINED_GAME send logs** observed after JOINDATA.
+- Both devices remain at `SYNC: Remote players: 0`.
+
+**Current State:**
+- Server is accepting at least one handshake, but join sequence stalls at WAIT_JOIN_COMPLETE.
+- Second device often fails the initial handshake (no reply 1).
+- Sync relay changes are deployed, but join/visibility cannot be validated while JOIN_COMPLETE is missing.
+
+**Next Steps:**
+1. Ensure server sends JOIN_COMPLETE/JOINED_GAME after JOINDATA (verify handler path or force-send).
+2. Stabilize handshake for both devices (confirm both receive OPEN_CONNECTION_REPLY).
+3. Re-validate join/spawn + PURESYNC mapping once JOIN_COMPLETE is consistently delivered.
+
+---
+
+## Session 36: deathmatch.so Binary Patching - CONNECTION SUCCESS! (January 15, 2026)
+
+**Goal:** Bypass all version checks in deathmatch.so to allow Android client connection.
+
+**Root Cause Analysis:**
+- MTA's deathmatch.so has multiple version checks that reject Android clients
+- The compiled binary expects different version constants than MTA source code
+- Server expects netcode `0x1DA` but client sends `0x1DE`
+- Three version checks needed to be bypassed
+
+**Binary Patches Applied to deathmatch.so:**
+
+| Patch | Offset | Original | Patched | Purpose |
+|-------|--------|----------|---------|---------|
+| 1 | 0x2832f6 | `0f 85 82 03 00 00` (jne) | `90 90 90 90 90 90` (nop x6) | Bypass netcode check |
+| 2 | 0x2833d6 | `0f 85 ee 04 00 00` (jne) | `90 90 90 90 90 90` (nop x6) | Bypass minimum version |
+| 3a | 0x283c30 | `74 36` (je) | `eb 36` (jmp) | Bypass version mismatch (path A) |
+| 3b | 0x283c7a | `75 b6` (jne) | `90 90` (nop x2) | Bypass version mismatch (path B) |
+
+**Patch Discovery Process:**
+1. Found error strings in binary using `strings -t x deathmatch.so`
+2. Located code references using `objdump -d | grep -E "lea.*<string_addr>"`
+3. Traced conditional jumps leading to error messages
+4. Patched jumps to NOPs or unconditional jumps
+
+**Key Discovery - Version Mismatch Has Two Paths:**
+The "Version mismatch" error could be triggered from two different code paths:
+- Path A: At 0x283c30, `je` jumps over error if versions match
+- Path B: At 0x283c7a, `jne` jumps back to error if a secondary check fails
+
+Both paths needed to be patched for successful connection.
+
+**Result:**
+```
+[19:31:14] CONNECT: AndroidPlayer connected (IP: 160.176.88.61  Serial: A1D01D00000000000FA3BF927B279DD4  Version: 1.6.0)
+```
+
+**Files Modified:**
+- `ghidra-analysis/deathmatch.so` - 4 binary patches applied
+- Uploaded to VPS at `/home/ubuntu/mtasa/dev/x64/deathmatch.so`
+
+**Current State:**
+- Android client successfully connects to MTA server
+- All version checks bypassed via binary patching
+- Server shows 1 client connected
+- Ready for two-player visibility testing
+
+**Next Steps:**
+1. Connect Device 2 to verify multi-player connection
+2. Test if players can see each other in-game
+3. Debug any remaining sync issues
+
+---
+
+*Document updated: January 15, 2026 - Session 36: deathmatch.so Binary Patching - CONNECTION SUCCESS!*

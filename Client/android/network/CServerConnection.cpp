@@ -986,14 +986,11 @@ void CServerConnection::SendJoinDataPacket()
 
     // Player version string (format: major.minor.patch-type.build.revision)
     // Real MTA clients use format like "1.6.0-9.23324.0"
-    // Type 9 = release builds, build number must be reasonable
-    std::string versionString = "1.6.0-9.21000.0";
+    // Type 9 = release builds, build number must match server expectations
+    std::string versionString = "1.6.0-9.23324.0";
     bitStream.Write(versionString);
 
-    // Update required flag (1 bit)
-    bitStream.WriteBit(false);
-
-    // Game version (GTA:SA)
+    // Game version (GTA:SA) - NO update required flag, PC format doesn't have it
     bitStream.Write(m_playerInfo.gameVersion);
 
     // Nickname (fixed 22 bytes)
@@ -1278,16 +1275,12 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
         return;  // Local player id not assigned yet
     }
 
-    // Player ID (ElementID on the wire)
-    WriteElementId(*bitStream, static_cast<uint32_t>(m_playerId));
+    // Note: ElementID is NOT written here - the server relay (CNetServerAndroid.cpp)
+    // prepends it before broadcasting to other clients
 
     // Sync context
     uint8_t syncTimeContext = static_cast<uint8_t>(GetCurrentTimeMs() & 0xFF);
     bitStream->Write(syncTimeContext);
-
-    // Latency (compressed)
-    uint16_t latency = 0;
-    bitStream->WriteCompressed(latency);
 
     // Controller state (derived from movement for now)
     SControllerState controller = BuildControllerFromVelocity(vx, vy, rotation);
@@ -1342,6 +1335,9 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     SPcCameraRotationSync camRot;
     camRot.rotation = rotation;
     camRot.Write(*bitStream);
+
+    // Camera orientation (PC format expects this after camera rotation)
+    WriteCameraOrientationPlaceholder(*bitStream, rotation);
 
     // Send packet directly via our socket (not through CNetAndroid which has a separate socket)
     if (m_socket >= 0)

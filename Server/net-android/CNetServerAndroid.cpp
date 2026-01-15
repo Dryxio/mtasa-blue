@@ -202,7 +202,12 @@ void CNetServerAndroid::DoPulse()
 
     if (now - lastLogTime > 10000)  // Log every 10 seconds
     {
-        NET_LOG("DoPulse: %d calls, %zu clients, queue processing active", pulseCount, m_clients.size());
+        size_t clientCount;
+        {
+            std::lock_guard<std::mutex> lock(m_clientsMutex);
+            clientCount = m_clients.size();
+        }
+        NET_LOG("DoPulse: %d calls, %zu clients, queue processing active", pulseCount, clientCount);
         lastLogTime = now;
     }
 
@@ -367,6 +372,14 @@ void CNetServerAndroid::ProcessIncomingPacket(const uint8_t* data, int length,
 
     uint8_t packetID = data[0];
     LogPacket("<-", data, length, fromAddr);
+
+    // Track latest port for this IP (to handle NAT port changes)
+    {
+        std::lock_guard<std::mutex> portLock(m_portMapMutex);
+        uint32_t ip = ntohl(fromAddr.sin_addr.s_addr);
+        uint16_t port = ntohs(fromAddr.sin_port);
+        m_ipToLatestPort[ip] = port;
+    }
 
     // Get or create client - hold lock for entire packet processing
     // to prevent DoPulse from removing the client while we're using it
@@ -874,11 +887,19 @@ void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
     // Mark as connected
     client.state = ClientState::CONNECTED;
 
-    // NOTE: We no longer send JOIN_COMPLETE/JOINED_GAME manually here.
-    // deathmatch.so will handle that via Packet_PlayerJoinData() -> our SendPacket()
-    // The caller (ProcessIncomingPacket) will call the packet handler with PLAYER_JOINDATA
+    // OPTION D: Send JOIN_COMPLETE directly instead of waiting for deathmatch.so
+    // This bypasses the unreliable path through deathmatch.so -> SendPacket
+    NET_LOG("*** CLIENT JOINDATA RECEIVED - sending JOIN_COMPLETE directly ***");
+    SendJoinComplete(client);
 
-    NET_LOG("*** CLIENT JOINDATA RECEIVED - waiting for deathmatch.so to process ***");
+    // Send existing players to the new client
+    SendExistingPlayersTo(client);
+
+    // Notify existing clients about the new player
+    NotifyPlayerJoined(client);
+
+    // Send spawn info to the new client
+    SendPlayerSpawn(client);
 }
 
 void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
@@ -941,6 +962,146 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
 
     SendRawPacket(joinedPacket, offset, destAddr);
     NET_LOG("-> Sent JOINED_GAME (player ID: %d)", playerIndex);
+}
+
+void CNetServerAndroid::SendPlayerSpawn(ClientConnection& client)
+{
+    // PLAYER_SPAWN packet (0x18 = 24) tells client to spawn a remote player
+    // Format: playerId (17 bits), model (16 bits), teamId (16 bits), position (3 floats), rotation (float), health (float), armor (float), nickLen (8 bits), nick (N bytes)
+
+    uint8_t packet[128];
+    int offset = 0;
+
+    packet[offset++] = 0x18;  // PLAYER_SPAWN (24 in client's PacketID enum)
+
+    // Player ID (2 bytes, little-endian)
+    uint16_t playerId = 1;  // TODO: Use actual player ID
+    packet[offset++] = playerId & 0xFF;
+    packet[offset++] = (playerId >> 8) & 0xFF;
+
+    // Model ID (2 bytes, little-endian) - 0 = CJ
+    packet[offset++] = 0;
+    packet[offset++] = 0;
+
+    // Team ID (2 bytes) - 0 = no team
+    packet[offset++] = 0xFF;
+    packet[offset++] = 0xFF;
+
+    // Position X (float, little-endian)
+    float posX = 2245.0f, posY = -1261.0f, posZ = 24.0f;
+    memcpy(packet + offset, &posX, 4); offset += 4;
+    memcpy(packet + offset, &posY, 4); offset += 4;
+    memcpy(packet + offset, &posZ, 4); offset += 4;
+
+    // Rotation (float)
+    float rot = 0.0f;
+    memcpy(packet + offset, &rot, 4); offset += 4;
+
+    // Health (float)
+    float health = 100.0f;
+    memcpy(packet + offset, &health, 4); offset += 4;
+
+    // Armor (float)
+    float armor = 0.0f;
+    memcpy(packet + offset, &armor, 4); offset += 4;
+
+    // Nickname length + nickname
+    const char* nick = "RemotePlayer";
+    uint8_t nickLen = strlen(nick);
+    packet[offset++] = nickLen;
+    memcpy(packet + offset, nick, nickLen);
+    offset += nickLen;
+
+    sockaddr_in destAddr;
+    destAddr.sin_family = AF_INET;
+    destAddr.sin_addr.s_addr = htonl(client.playerID.GetBinaryAddress());
+    destAddr.sin_port = htons(client.playerID.GetPort());
+
+    SendRawPacket(packet, offset, destAddr);
+    NET_LOG("-> Sent PLAYER_SPAWN to client");
+}
+
+void CNetServerAndroid::NotifyPlayerJoined(ClientConnection& newPlayer)
+{
+    // Send PLAYER_JOIN (0x03 = 3) to all existing clients
+    // Format: playerId (16 bits), nickLen (8 bits), nick (N bytes)
+    // NOTE: Caller must NOT hold m_clientsMutex - we lock it here
+
+    uint8_t packet[64];
+    int offset = 0;
+
+    packet[offset++] = 0x03;  // PLAYER_JOIN (3 in client's PacketID enum)
+
+    // Player ID (2 bytes)
+    uint16_t playerId = 2;  // New player's ID
+    packet[offset++] = playerId & 0xFF;
+    packet[offset++] = (playerId >> 8) & 0xFF;
+
+    // Nickname
+    const char* nick = "AndroidPlayer";
+    uint8_t nickLen = strlen(nick);
+    packet[offset++] = nickLen;
+    memcpy(packet + offset, nick, nickLen);
+    offset += nickLen;
+
+    // Send to all connected clients except the new one
+    // NOTE: No lock needed - called after lock is released
+    for (auto& pair : m_clients)
+    {
+        if (pair.second.state == ClientState::CONNECTED &&
+            !(pair.second.playerID == newPlayer.playerID))
+        {
+            sockaddr_in destAddr;
+            destAddr.sin_family = AF_INET;
+            destAddr.sin_addr.s_addr = htonl(pair.second.playerID.GetBinaryAddress());
+            destAddr.sin_port = htons(pair.second.playerID.GetPort());
+
+            SendRawPacket(packet, offset, destAddr);
+            NET_LOG("-> Sent PLAYER_JOIN notification to existing client");
+        }
+    }
+}
+
+void CNetServerAndroid::SendExistingPlayersTo(ClientConnection& newPlayer)
+{
+    // Send PLAYER_LIST or PLAYER_JOIN for each existing player to the new client
+    // NOTE: No lock - called while m_clientsMutex is already held by caller
+
+    int existingCount = 0;
+    for (auto& pair : m_clients)
+    {
+        if (pair.second.state == ClientState::CONNECTED &&
+            !(pair.second.playerID == newPlayer.playerID))
+        {
+            existingCount++;
+
+            // Send PLAYER_JOIN for this existing player
+            uint8_t packet[64];
+            int offset = 0;
+
+            packet[offset++] = 0x03;  // PLAYER_JOIN (3 in client's PacketID enum)
+
+            // Player ID
+            uint16_t playerId = existingCount;
+            packet[offset++] = playerId & 0xFF;
+            packet[offset++] = (playerId >> 8) & 0xFF;
+
+            // Nickname
+            const char* nick = "AndroidPlayer";
+            uint8_t nickLen = strlen(nick);
+            packet[offset++] = nickLen;
+            memcpy(packet + offset, nick, nickLen);
+            offset += nickLen;
+
+            sockaddr_in destAddr;
+            destAddr.sin_family = AF_INET;
+            destAddr.sin_addr.s_addr = htonl(newPlayer.playerID.GetBinaryAddress());
+            destAddr.sin_port = htons(newPlayer.playerID.GetPort());
+
+            SendRawPacket(packet, offset, destAddr);
+            NET_LOG("-> Sent existing player %d to new client", playerId);
+        }
+    }
 }
 
 //=============================================================================
@@ -1026,13 +1187,15 @@ void CNetServerAndroid::QueuePacketForMainThread(uint8_t packetID,
     }
 
     // Add to queue (thread-safe)
+    size_t queueSize;
     {
         std::lock_guard<std::mutex> lock(m_packetQueueMutex);
         m_packetQueue.push_back(std::move(packet));
+        queueSize = m_packetQueue.size();
     }
 
     NET_LOG("*** QUEUED packet ID=%d for main thread (queue size now: %zu) ***",
-            packetID, m_packetQueue.size());
+            packetID, queueSize);
 }
 
 void CNetServerAndroid::ProcessQueuedPackets()
@@ -1077,8 +1240,11 @@ void CNetServerAndroid::ProcessQueuedPackets()
 
         NET_LOG("*** MAIN THREAD: Handler returned successfully ***");
 
-        bitStream->Release();
-        extraInfo->Release();
+        // TEMPORARY: Don't release bitstream immediately - deathmatch.so may still be using it
+        // on a worker thread. This leaks memory but will confirm use-after-free theory.
+        // TODO: Implement proper reference counting coordination with deathmatch.so
+        // bitStream->Release();
+        // extraInfo->Release();
     }
 }
 
@@ -1115,11 +1281,12 @@ bool CNetServerAndroid::SendPacket(unsigned char ucPacketID,
             break;
         case MTAPacketID::SERVER_JOIN_COMPLETE:  // 2 -> 0x02 (same, but log it)
             wirePacketID = WirePacketID::SERVER_JOIN_COMPLETE;
-            NET_LOG("SendPacket: SERVER_JOIN_COMPLETE (2 -> 0x02)");
+            NET_LOG("SendPacket: SERVER_JOIN_COMPLETE (2 -> 0x02) to %lu:%u",
+                    playerID.GetBinaryAddress(), playerID.GetPort());
             break;
-        case MTAPacketID::SERVER_JOINEDGAME:  // 21 -> 0x16
+        case MTAPacketID::SERVER_JOINEDGAME:  // 22 -> 0x16
             wirePacketID = WirePacketID::SERVER_JOINEDGAME;
-            NET_LOG("SendPacket: Converting SERVER_JOINEDGAME (21 -> 0x16)");
+            NET_LOG("SendPacket: Converting SERVER_JOINEDGAME (22 -> 0x16)");
             break;
         default:
             NET_LOG("SendPacket: Packet ID 0x%02X (no conversion)", ucPacketID);
@@ -1182,10 +1349,28 @@ bool CNetServerAndroid::SendPacket(unsigned char ucPacketID,
     else
     {
         // Send to specific client
+        // Use latest known port for this IP (handles NAT port changes)
+        uint32_t ip = playerID.GetBinaryAddress();
+        uint16_t port = playerID.GetPort();
+
+        {
+            std::lock_guard<std::mutex> portLock(m_portMapMutex);
+            auto it = m_ipToLatestPort.find(ip);
+            if (it != m_ipToLatestPort.end() && it->second != port)
+            {
+                NET_LOG("SendPacket: Correcting port %u -> %u for IP %08X",
+                        port, it->second, ip);
+                port = it->second;
+            }
+        }
+
         sockaddr_in destAddr;
         destAddr.sin_family = AF_INET;
-        destAddr.sin_addr.s_addr = htonl(playerID.GetBinaryAddress());
-        destAddr.sin_port = htons(playerID.GetPort());
+        destAddr.sin_addr.s_addr = htonl(ip);
+        destAddr.sin_port = htons(port);
+
+        NET_LOG("SendPacket: Sending %zu bytes to %s:%d (packet 0x%02X)",
+                packet.size(), inet_ntoa(destAddr.sin_addr), ntohs(destAddr.sin_port), wirePacketID);
 
         SendRawPacket(packet.data(), packet.size(), destAddr);
 
@@ -1197,9 +1382,9 @@ bool CNetServerAndroid::SendPacket(unsigned char ucPacketID,
         }
     }
 
-    // Update stats
-    m_packetStats[ucPacketID].iCount++;
-    m_packetStats[ucPacketID].iTotalBytes += packet.size();
+    // Update stats (outgoing traffic)
+    m_packetStats[STATS_OUTGOING_TRAFFIC][ucPacketID].iCount++;
+    m_packetStats[STATS_OUTGOING_TRAFFIC][ucPacketID].iTotalBytes += packet.size();
 
     return true;
 }
@@ -1300,7 +1485,8 @@ bool CNetServerAndroid::GetNetworkStatistics(NetStatistics* pDest,
 
 const SPacketStat* CNetServerAndroid::GetPacketStats()
 {
-    return m_packetStats;
+    // Return pointer to start of 2D array (treated as contiguous SPacketStat[512])
+    return &m_packetStats[0][0];
 }
 
 bool CNetServerAndroid::GetBandwidthStatistics(SBandwidthStatistics* pDest)
@@ -1444,20 +1630,12 @@ void CNetServerAndroid::GetClientSerialAndVersion(const NetServerPlayerID& playe
                                                    SFixedString<64>& strExtra,
                                                    SFixedString<32>& strVersion)
 {
-    // Use raw memory copies to avoid ABI issues with SFixedString
-    // The SFixedString is just a char array wrapper
-    char* serialPtr = reinterpret_cast<char*>(&strSerial);
-    char* extraPtr = reinterpret_cast<char*>(&strExtra);
-    char* versionPtr = reinterpret_cast<char*>(&strVersion);
-
     // Default serial - MUST be exactly 32 hex characters (A-F, 0-9 only!)
     // "ANDROID" is INVALID because N,D,R,I are not hex
     // Use A1D01D prefix (looks like ANDROID in hex-speak)
-    strncpy(serialPtr, "A1D01D00000000000000000000000000", 31);
-    serialPtr[31] = '\0';
-    extraPtr[0] = '\0';
-    strncpy(versionPtr, "1.6.0", 31);
-    versionPtr[31] = '\0';
+    strSerial = "A1D01D00000000000000000000000000";  // 32 hex chars
+    strExtra = "";
+    strVersion = "1.6.0";
 
     auto* client = GetClient(playerID);
     if (client)
@@ -1467,10 +1645,9 @@ void CNetServerAndroid::GetClientSerialAndVersion(const NetServerPlayerID& playe
         char serial[33];
         snprintf(serial, sizeof(serial), "A1D01D00%024llX",
                  (unsigned long long)client->guid);
-        strncpy(serialPtr, serial, 31);
-        serialPtr[31] = '\0';
+        strSerial = serial;
 
-        NET_LOG("Generated serial for client: %.32s", serialPtr);
+        NET_LOG("Generated serial for client: %s", static_cast<const char*>(strSerial));
     }
 }
 

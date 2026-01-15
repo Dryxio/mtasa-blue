@@ -93,11 +93,11 @@ struct ConnectionCallbacks
 // MTA version info (must match server expectations)
 // These values must match the running MTA:SA server version
 // For MTA 1.6.0 release servers:
-// Formula: MTA_DM_NETCODE_VERSION = _NETCODE_VERSION + (_NETCODE_VERSION_BRANCH_ID << 12)
-// Where _NETCODE_VERSION = 0x1DE and _NETCODE_VERSION_BRANCH_ID = 0x4 (trunk/release)
-constexpr uint16_t MTA_DM_NETCODE_VERSION = 0x41DE;  // 0x1DE + (0x4 << 12) = release netcode
+// Release builds use just _NETCODE_VERSION (0x1DE), NOT with branch ID
+// Non-release builds add branch ID: _NETCODE_VERSION + (_NETCODE_VERSION_BRANCH_ID << 12)
+constexpr uint16_t MTA_DM_NETCODE_VERSION = 0x1DE;  // Release netcode (no branch ID)
 constexpr uint16_t MTA_DM_VERSION = 0x0160;          // 1.6.0 ((1<<8)|(6<<4)|0)
-constexpr uint16_t MTA_DM_BITSTREAM_VERSION = 0x06B; // Bitstream version (0x06B = 107)
+constexpr uint16_t MTA_DM_BITSTREAM_VERSION = 0x030; // Bitstream version (match server)
 
 constexpr size_t MAX_PLAYER_NICK_LENGTH = 22;
 constexpr size_t MAX_SERIAL_LENGTH = 32;

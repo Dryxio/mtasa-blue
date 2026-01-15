@@ -50,8 +50,8 @@ public:
     {
         if (str)
         {
-            strncpy(m_data, str, MAX_LENGTH - 1);
-            m_data[MAX_LENGTH - 1] = '\0';
+            strncpy(m_data, str, MAX_LENGTH);
+            m_data[MAX_LENGTH] = '\0';
         }
         else
         {
@@ -61,7 +61,7 @@ public:
     }
 
 private:
-    char m_data[MAX_LENGTH];
+    char m_data[MAX_LENGTH + 1];  // +1 for null terminator (matches SharedUtil.Misc.h)
 };
 
 // SNetExtraInfo MUST inherit from CRefCountable to match MTA's ABI!
@@ -424,8 +424,8 @@ namespace MTAPacketID
     static const uint8_t PLAYER_QUIT = 5;
     static const uint8_t PLAYER_TIMEOUT = 6;
     static const uint8_t MOD_NAME = 7;
-    static const uint8_t SERVER_JOINEDGAME = 21;
-    static const uint8_t SERVER_DISCONNECTED = 22;
+    static const uint8_t SERVER_JOINEDGAME = 22;
+    static const uint8_t SERVER_DISCONNECTED = 23;
 }
 
 // Wire format packet IDs - what the Android client expects on the network
@@ -675,9 +675,13 @@ private:
     std::map<uint64_t, ClientConnection> m_clients;
     std::mutex              m_clientsMutex;
 
+    // Track latest port for each IP (to fix NAT port changes)
+    std::map<uint32_t, uint16_t> m_ipToLatestPort;
+    std::mutex              m_portMapMutex;
+
     PPACKETHANDLER          m_pfnPacketHandler = nullptr;
 
-    SPacketStat             m_packetStats[256];
+    SPacketStat             m_packetStats[2][256];  // [0]=incoming, [1]=outgoing (matches CPerfStat expectations)
     uint64_t                m_startTime = 0;
     uint64_t                m_serverGUID = 0;
 
@@ -691,7 +695,7 @@ private:
     std::vector<QueuedPacket> m_packetQueue;
     std::mutex                m_packetQueueMutex;
 
-    static const uint16_t BITSTREAM_VERSION = 0x06B;
+    static const uint16_t BITSTREAM_VERSION = 0x030;  // Must match eBitStreamVersion::Latest in Shared/sdk/net/bitstream.h
 };
 
 //=============================================================================

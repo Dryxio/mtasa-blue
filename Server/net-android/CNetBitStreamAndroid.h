@@ -134,8 +134,7 @@ public:
     virtual void Write(const int& input) = 0;
     virtual void Write(const float& input) = 0;
     virtual void Write(const double& input) = 0;
-    // NOTE: Order matches the MTA server binary vtable layout (1.6 release).
-    // Swapped relative to newer headers to avoid WriteStr calling the wrong slot.
+    // Order for deathmatch.so compatibility: ISyncStructure* BEFORE char*,int
     virtual void Write(const ISyncStructure* syncStruct) = 0;
     virtual void Write(const char* input, int numberOfBytes) = 0;
 
@@ -165,6 +164,7 @@ public:
     virtual bool Read(int& output) = 0;
     virtual bool Read(float& output) = 0;
     virtual bool Read(double& output) = 0;
+    // Order for deathmatch.so compatibility: ISyncStructure* BEFORE char*,int
     virtual bool Read(ISyncStructure* syncStruct) = 0;
     virtual bool Read(char* output, int numberOfBytes) = 0;
 
