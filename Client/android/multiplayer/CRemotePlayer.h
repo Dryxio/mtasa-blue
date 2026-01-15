@@ -364,6 +364,37 @@ public:
      */
     void Despawn();
 
+    /**
+     * Set pending spawn data (for deferred spawn when game isn't ready)
+     */
+    void SetPendingSpawn(const CVector3D& position, float rotation, uint16_t skinId)
+    {
+        m_pendingSpawnPosition = position;
+        m_pendingSpawnRotation = rotation;
+        m_pendingSpawnSkinId = skinId;
+        m_hasPendingSpawn = true;
+        REMOTE_LOGI("Player %u: Pending spawn set at (%.1f, %.1f, %.1f)",
+                    m_playerId, position.x, position.y, position.z);
+    }
+
+    /**
+     * Check if there's a pending spawn
+     */
+    bool HasPendingSpawn() const { return m_hasPendingSpawn; }
+
+    /**
+     * Execute pending spawn (call when game is ready)
+     */
+    void ExecutePendingSpawn()
+    {
+        if (m_hasPendingSpawn)
+        {
+            REMOTE_LOGI("Player %u: Executing pending spawn", m_playerId);
+            Spawn(m_pendingSpawnPosition, m_pendingSpawnRotation, m_pendingSpawnSkinId);
+            m_hasPendingSpawn = false;
+        }
+    }
+
 private:
     //=========================================================================
     // Internal Methods
@@ -493,6 +524,12 @@ private:
     InterpolationState m_interp;
     CVector3D m_currentPosition;
     float m_currentRotation;
+
+    // Pending spawn (for deferred spawn when game isn't ready)
+    bool m_hasPendingSpawn;
+    CVector3D m_pendingSpawnPosition;
+    float m_pendingSpawnRotation;
+    uint16_t m_pendingSpawnSkinId;
 };
 
 //=============================================================================
@@ -519,6 +556,9 @@ inline CRemotePlayer::CRemotePlayer(uint32_t playerId, const std::string& nickna
     , m_lastMoveTime(0)
     , m_lastMoveState(0xFF)
     , m_currentRotation(0)
+    , m_hasPendingSpawn(false)
+    , m_pendingSpawnRotation(0)
+    , m_pendingSpawnSkinId(0)
 {
     REMOTE_LOGI("Created remote player %u: %s", playerId, nickname.c_str());
 }

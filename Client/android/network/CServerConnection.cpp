@@ -1295,6 +1295,9 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     uint8_t syncTimeContext = static_cast<uint8_t>(GetCurrentTimeMs() & 0xFF);
     bitStream->Write(syncTimeContext);
 
+    // Latency (compressed uint16_t) - receiver expects this field
+    bitStream->WriteCompressed(static_cast<uint16_t>(0));
+
     // Controller state (derived from movement for now)
     SControllerState controller = BuildControllerFromVelocity(vx, vy, rotation);
     WriteFullKeysync(controller, *bitStream);

@@ -634,13 +634,23 @@ inline void CPlayerManager::UpdatePlayerSync(uint32_t playerId, const RemoteSync
             m_callbacks.onPlayerAdded(playerId, autoNickname);
         }
     }
-    else if (!it->second->IsSpawned() && hasValidPosition && canSpawnRemote)
+    else if (!it->second->IsSpawned() && canSpawnRemote)
     {
-        // Player exists but not spawned yet - try spawning now with valid position, game ready, and local player exists
-        PMGR_LOGI("Deferred spawn for player %u at (%.1f,%.1f,%.1f)",
-                  playerId, data.position.x, data.position.y, data.position.z);
-        CVector3D spawnPos(data.position.x, data.position.y, data.position.z);
-        it->second->Spawn(spawnPos, data.rotation, 0);
+        // Player exists but not spawned yet - try spawning now
+        if (it->second->HasPendingSpawn())
+        {
+            // Execute pending spawn from PLAYER_SPAWN packet (preferred - has correct position/skin)
+            PMGR_LOGI("Executing pending spawn for player %u", playerId);
+            it->second->ExecutePendingSpawn();
+        }
+        else if (hasValidPosition)
+        {
+            // Fallback: spawn using sync data position
+            PMGR_LOGI("Deferred spawn for player %u at (%.1f,%.1f,%.1f)",
+                      playerId, data.position.x, data.position.y, data.position.z);
+            CVector3D spawnPos(data.position.x, data.position.y, data.position.z);
+            it->second->Spawn(spawnPos, data.rotation, 0);
+        }
     }
 
     it->second->UpdateSyncData(data);
@@ -666,12 +676,43 @@ inline void CPlayerManager::UpdatePlayerSync(uint32_t playerId, const RemoteSync
 inline void CPlayerManager::SpawnPlayer(uint32_t playerId, const CVector3D& position,
                                          float rotation, uint16_t skinId)
 {
+    // Check spawn delay conditions (same as UpdatePlayerSync)
+    bool gameReady = (m_gameState == 9);
+    bool localPlayerExists = MTA::Android::Game::CGameBypass::GetInstance().IsLocalPlayerSpawned();
+
+    uint64_t now = GetTimeMs();
+    if (localPlayerExists && !m_localPlayerWasEverSeen)
+    {
+        m_localPlayerFirstSeenTime = now;
+        m_localPlayerWasEverSeen = true;
+        PMGR_LOGI("Local player first seen at time %llu - starting %d ms spawn delay",
+                  (unsigned long long)now, REMOTE_PED_SPAWN_DELAY_MS);
+    }
+
+    bool spawnDelayPassed = false;
+    if (m_localPlayerWasEverSeen)
+    {
+        uint64_t elapsed = now - m_localPlayerFirstSeenTime;
+        spawnDelayPassed = (elapsed >= REMOTE_PED_SPAWN_DELAY_MS);
+    }
+
+    bool canSpawnRemote = gameReady && localPlayerExists && spawnDelayPassed;
+
     std::lock_guard<std::mutex> lock(m_playersMutex);
 
     auto it = m_players.find(playerId);
     if (it == m_players.end())
     {
         PMGR_LOGW("Cannot spawn unknown player %u", playerId);
+        return;
+    }
+
+    if (!canSpawnRemote)
+    {
+        // Store spawn data for deferred spawn - UpdatePlayerSync will spawn later
+        it->second->SetPendingSpawn(position, rotation, skinId);
+        PMGR_LOGW("Deferring SpawnPlayer for %u - gameReady=%d localPlayer=%d delayPassed=%d",
+                  playerId, gameReady, localPlayerExists, spawnDelayPassed);
         return;
     }
 
