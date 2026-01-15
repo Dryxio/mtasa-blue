@@ -95,6 +95,19 @@ bool ShouldDispatchDuringJoin(uint8_t packetId)
             return false;
     }
 }
+
+// Map server's non-standard packet IDs to correct MTA protocol IDs
+// Server sends PLAYER_SPAWN as 0x18, but MTA PC protocol expects 0x1A
+PacketID MapServerPacketId(uint8_t packetId)
+{
+    if (packetId == 0x18)
+    {
+        // Server incorrectly sends PLAYER_SPAWN as 0x18 (which is RPC in MTA PC)
+        // Remap to correct PLAYER_SPAWN ID
+        return PacketID::PLAYER_SPAWN;
+    }
+    return static_cast<PacketID>(packetId);
+}
 } // namespace
 
 //=============================================================================
@@ -777,7 +790,7 @@ void CServerConnection::ProcessWaitJoinComplete()
                 NetBitStream bitStream(buffer + 1, received - 1);
                 if (m_network && m_network->HasPacketHandler())
                 {
-                    m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                    m_network->DispatchPacket(MapServerPacketId(packetId), bitStream);
                     bitStream.ResetReadPointer();
                 }
                 HandleJoinedGamePacket(bitStream);
@@ -786,7 +799,7 @@ void CServerConnection::ProcessWaitJoinComplete()
             {
                 LOGD("WAIT_JOIN_COMPLETE: dispatching packet 0x%02X (%zd bytes)", packetId, received);
                 NetBitStream bitStream(buffer + 1, received - 1);
-                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                m_network->DispatchPacket(MapServerPacketId(packetId), bitStream);
             }
             else
             {
@@ -823,7 +836,7 @@ void CServerConnection::ProcessWaitJoinedGame()
                 NetBitStream bitStream(buffer + 1, received - 1);
                 if (m_network && m_network->HasPacketHandler())
                 {
-                    m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                    m_network->DispatchPacket(MapServerPacketId(packetId), bitStream);
                     bitStream.ResetReadPointer();
                 }
                 HandleJoinedGamePacket(bitStream);
@@ -832,7 +845,7 @@ void CServerConnection::ProcessWaitJoinedGame()
             {
                 LOGD("WAIT_JOINED_GAME: dispatching packet 0x%02X (%zd bytes)", packetId, received);
                 NetBitStream bitStream(buffer + 1, received - 1);
-                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                m_network->DispatchPacket(MapServerPacketId(packetId), bitStream);
             }
             else
             {
@@ -886,7 +899,7 @@ void CServerConnection::ProcessConnected()
             if (m_network && m_network->HasPacketHandler())
             {
                 NetBitStream bitStream(buffer + 1, received - 1);
-                m_network->DispatchPacket(static_cast<PacketID>(packetId), bitStream);
+                m_network->DispatchPacket(MapServerPacketId(packetId), bitStream);
             }
         }
     }

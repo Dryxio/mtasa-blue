@@ -713,23 +713,28 @@ void CPacketHandler::Packet_PlayerJoin(NetBitStream& bitStream)
 
     logPos("start");
     logHex("start");
-    if (!ReadElementId(bitStream, playerId))
+
+    // Server sends raw uint16_t player ID (not 17-bit ElementID)
+    uint16_t rawPlayerId = 0;
+    if (!bitStream.Read(rawPlayerId))
     {
         fail("playerId");
         return;
     }
+    playerId = rawPlayerId;
     logPos("after playerId");
 
-    uint16_t nicknameLength = 0;
+    // Server sends uint8_t nickname length (not uint16_t)
+    uint8_t nicknameLength = 0;
     if (!bitStream.Read(nicknameLength))
     {
         fail("nicknameLength");
         return;
     }
-    if (nicknameLength > 256)
+    if (nicknameLength > 64)
     {
         LOGD("PLAYER_JOIN invalid nickname length %u", nicknameLength);
-        fail("nicknameLength > 256");
+        fail("nicknameLength > 64");
         return;
     }
     nickname.resize(nicknameLength);
@@ -780,15 +785,15 @@ void CPacketHandler::Packet_PlayerQuit(NetBitStream& bitStream)
 
 void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
 {
+    // Server sends non-standard raw format (not MTA PC bitstream format):
+    // uint16_t playerId, uint16_t modelId, uint16_t teamId,
+    // float x, float y, float z, float rotation,
+    // float health, float armor, uint8_t nicknameLength, char[] nickname
+
     uint32_t playerId;
-    uint8_t flags = 0;
     float x, y, z;
     float rotation;
     uint16_t skinId;
-    uint8_t interior = 0;
-    uint16_t dimension = 0;
-    uint32_t teamId = 0;
-    uint8_t timeContext = 0;
 
     static int s_debugSpawnCount = 0;
     const bool debug = (s_debugSpawnCount < 5);
@@ -808,7 +813,7 @@ void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
             return;
         const uint8_t* data = bitStream.GetData();
         const int bytesUsed = bitStream.GetBytesUsed();
-        const int dumpBytes = std::min(bytesUsed, 32);
+        const int dumpBytes = std::min(bytesUsed, 48);
         char buffer[256];
         int offset = 0;
         offset += std::snprintf(buffer + offset, sizeof(buffer) - offset, "%s bytes=", label);
@@ -818,10 +823,8 @@ void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
         }
         LOGD("PLAYER_SPAWN %s", buffer);
     };
-    auto readOk = [&](bool ok, const char* label) -> bool
+    auto fail = [&](const char* label)
     {
-        if (ok)
-            return true;
         if (debug)
         {
             LOGD("PLAYER_SPAWN failed %s", label);
@@ -829,55 +832,117 @@ void CPacketHandler::Packet_PlayerSpawn(NetBitStream& bitStream)
             logHex("fail");
             ++s_debugSpawnCount;
         }
-        return false;
     };
 
     logPos("start");
     logHex("start");
-    if (!readOk(ReadElementId(bitStream, playerId), "playerId")) return;
+
+    // Server sends raw uint16_t player ID (not 17-bit ElementID)
+    uint16_t rawPlayerId = 0;
+    if (!bitStream.Read(rawPlayerId))
+    {
+        fail("playerId");
+        return;
+    }
+    playerId = rawPlayerId;
     logPos("after playerId");
-    if (!readOk(bitStream.Read(flags), "flags")) return;
-    logPos("after flags");
-    if (!readOk(bitStream.Read(x), "x")) return;
-    logPos("after x");
-    if (!readOk(bitStream.Read(y), "y")) return;
-    logPos("after y");
-    if (!readOk(bitStream.Read(z), "z")) return;
-    logPos("after z");
-    if (!readOk(bitStream.Read(rotation), "rotation")) return;
-    logPos("after rotation");
-    if (!readOk(bitStream.Read(skinId), "skinId")) return;
-    logPos("after skinId");
-    if (!readOk(bitStream.Read(interior), "interior")) return;
-    logPos("after interior");
-    if (!readOk(bitStream.Read(dimension), "dimension")) return;
-    logPos("after dimension");
-    if (!readOk(ReadElementId(bitStream, teamId), "teamId")) return;
+
+    // Model ID (skin)
+    uint16_t modelId = 0;
+    if (!bitStream.Read(modelId))
+    {
+        fail("modelId");
+        return;
+    }
+    skinId = modelId;
+    logPos("after modelId");
+
+    // Team ID (unused but must read)
+    uint16_t teamId = 0;
+    if (!bitStream.Read(teamId))
+    {
+        fail("teamId");
+        return;
+    }
     logPos("after teamId");
-    if (!readOk(bitStream.Read(timeContext), "timeContext")) return;
-    logPos("after timeContext");
 
-    (void)flags;
-    (void)interior;
-    (void)dimension;
-    (void)teamId;
-    (void)timeContext;
+    // Position
+    if (!bitStream.Read(x))
+    {
+        fail("x");
+        return;
+    }
+    if (!bitStream.Read(y))
+    {
+        fail("y");
+        return;
+    }
+    if (!bitStream.Read(z))
+    {
+        fail("z");
+        return;
+    }
+    logPos("after position");
 
-    LOGI("CPacketHandler: Player %u spawned at (%.1f, %.1f, %.1f)", playerId, x, y, z);
+    // Rotation
+    if (!bitStream.Read(rotation))
+    {
+        fail("rotation");
+        return;
+    }
+    logPos("after rotation");
+
+    // Health (non-standard, not in MTA PC format)
+    float health = 0.0f;
+    if (!bitStream.Read(health))
+    {
+        fail("health");
+        return;
+    }
+    logPos("after health");
+
+    // Armor (non-standard, not in MTA PC format)
+    float armor = 0.0f;
+    if (!bitStream.Read(armor))
+    {
+        fail("armor");
+        return;
+    }
+    logPos("after armor");
+
+    // Nickname (non-standard, not in MTA PC format)
+    uint8_t nicknameLength = 0;
+    std::string nickname;
+    if (!bitStream.Read(nicknameLength))
+    {
+        fail("nicknameLength");
+        return;
+    }
+    if (nicknameLength > 0 && nicknameLength <= 64)
+    {
+        nickname.resize(nicknameLength);
+        if (!bitStream.Read(&nickname[0], nicknameLength))
+        {
+            fail("nickname");
+            return;
+        }
+    }
+    logPos("after nickname");
+
+    LOGI("CPacketHandler: Player %u ('%s') spawned at (%.1f, %.1f, %.1f) skin=%u health=%.0f",
+         playerId, nickname.c_str(), x, y, z, skinId, health);
+
     if (debug)
     {
-        LOGD("PLAYER_SPAWN parsed id=%u flags=0x%02X pos=(%.3f,%.3f,%.3f) rot=%.3f skin=%u interior=%u dimension=%u team=%u time=%u",
+        LOGD("PLAYER_SPAWN parsed id=%u model=%u team=%u pos=(%.3f,%.3f,%.3f) rot=%.3f health=%.1f armor=%.1f nick='%s'",
              playerId,
-             flags,
-             x,
-             y,
-             z,
-             rotation,
-             skinId,
-             interior,
-             dimension,
+             modelId,
              teamId,
-             timeContext);
+             x, y, z,
+             rotation,
+             health,
+             armor,
+             nickname.c_str());
         ++s_debugSpawnCount;
     }
 
