@@ -861,7 +861,7 @@ void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
 
     NET_LOG("Received PLAYER_JOINDATA (%d bytes)", length);
 
-    // Parse join data to extract bitstream version
+    // Parse join data to extract bitstream version and player name
     if (length >= 7)
     {
         int offset = 1;  // Skip packet ID
@@ -882,10 +882,37 @@ void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
                 netcodeVersion, mtaVersion, bitstreamVersion);
 
         client.bitstreamVersion = bitstreamVersion;
+
+        // Skip version string (uint16_t length + string data)
+        if (offset + 2 <= length)
+        {
+            uint16_t versionStringLen = data[offset] | (data[offset + 1] << 8);
+            offset += 2;
+            offset += versionStringLen;  // Skip string data
+
+            // Skip game version (1 byte)
+            if (offset + 1 <= length)
+            {
+                offset += 1;
+
+                // Read nickname (22 bytes fixed)
+                if (offset + 22 <= length)
+                {
+                    char nickname[23] = {0};
+                    memcpy(nickname, data + offset, 22);
+                    // Find actual string length (null-terminated or full 22 chars)
+                    size_t nickLen = strnlen(nickname, 22);
+                    client.playerName = std::string(nickname, nickLen);
+                    NET_LOG("   Player name: '%s'", client.playerName.c_str());
+                }
+            }
+        }
     }
 
-    // Mark as connected
+    // Mark as connected and assign unique player ID
     client.state = ClientState::CONNECTED;
+    client.gamePlayerId = m_nextGamePlayerId++;
+    NET_LOG("   Assigned gamePlayerId: %d", client.gamePlayerId);
 
     // OPTION D: Send JOIN_COMPLETE directly instead of waiting for deathmatch.so
     // This bypasses the unreliable path through deathmatch.so -> SendPacket
@@ -895,11 +922,14 @@ void CNetServerAndroid::HandlePlayerJoinData(const uint8_t* data, int length,
     // Send existing players to the new client
     SendExistingPlayersTo(client);
 
-    // Notify existing clients about the new player
+    // Notify existing clients about the new player (PLAYER_JOIN)
     NotifyPlayerJoined(client);
 
-    // Send spawn info to the new client
+    // Send spawn info for existing players to the new client
     SendPlayerSpawn(client);
+
+    // Send spawn info for the new player to existing clients
+    SendNewPlayerSpawnToExisting(client);
 }
 
 void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
@@ -948,8 +978,8 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
 
     joinedPacket[offset++] = WirePacketID::SERVER_JOINEDGAME;  // 0x16 on the wire
 
-    // Player ID (little-endian uint16)
-    uint16_t playerIndex = 1;  // TODO: Track properly
+    // Player ID (little-endian uint16) - use actual assigned ID
+    uint16_t playerIndex = client.gamePlayerId;
     joinedPacket[offset++] = playerIndex & 0xFF;
     joinedPacket[offset++] = (playerIndex >> 8) & 0xFF;
 
@@ -964,18 +994,89 @@ void CNetServerAndroid::SendJoinComplete(ClientConnection& client)
     NET_LOG("-> Sent JOINED_GAME (player ID: %d)", playerIndex);
 }
 
-void CNetServerAndroid::SendPlayerSpawn(ClientConnection& client)
+void CNetServerAndroid::SendPlayerSpawn(ClientConnection& newClient)
 {
-    // PLAYER_SPAWN packet (0x18 = 24) tells client to spawn a remote player
-    // Format: playerId (17 bits), model (16 bits), teamId (16 bits), position (3 floats), rotation (float), health (float), armor (float), nickLen (8 bits), nick (N bytes)
+    // Send PLAYER_SPAWN for each existing player to the new client
+    // NOTE: Called while m_clientsMutex is already held by caller
 
+    sockaddr_in destAddr;
+    destAddr.sin_family = AF_INET;
+    destAddr.sin_addr.s_addr = htonl(newClient.playerID.GetBinaryAddress());
+    destAddr.sin_port = htons(newClient.playerID.GetPort());
+
+    for (auto& pair : m_clients)
+    {
+        ClientConnection& existingClient = pair.second;
+
+        // Skip if not connected or if it's the new client itself
+        if (existingClient.state != ClientState::CONNECTED ||
+            existingClient.playerID == newClient.playerID)
+        {
+            continue;
+        }
+
+        uint8_t packet[128];
+        int offset = 0;
+
+        packet[offset++] = 0x18;  // PLAYER_SPAWN
+
+        // Player ID (2 bytes, little-endian) - use actual player ID
+        uint16_t playerId = existingClient.gamePlayerId;
+        packet[offset++] = playerId & 0xFF;
+        packet[offset++] = (playerId >> 8) & 0xFF;
+
+        // Model ID (2 bytes, little-endian) - 0 = CJ
+        packet[offset++] = 0;
+        packet[offset++] = 0;
+
+        // Team ID (2 bytes) - 0xFFFF = no team
+        packet[offset++] = 0xFF;
+        packet[offset++] = 0xFF;
+
+        // Position (3 floats) - spawn position
+        float posX = 2245.0f, posY = -1261.0f, posZ = 24.0f;
+        memcpy(packet + offset, &posX, 4); offset += 4;
+        memcpy(packet + offset, &posY, 4); offset += 4;
+        memcpy(packet + offset, &posZ, 4); offset += 4;
+
+        // Rotation (float)
+        float rot = 0.0f;
+        memcpy(packet + offset, &rot, 4); offset += 4;
+
+        // Health (float)
+        float health = 100.0f;
+        memcpy(packet + offset, &health, 4); offset += 4;
+
+        // Armor (float)
+        float armor = 0.0f;
+        memcpy(packet + offset, &armor, 4); offset += 4;
+
+        // Nickname - use actual player name
+        const char* nick = existingClient.playerName.empty() ? "Player" : existingClient.playerName.c_str();
+        uint8_t nickLen = strlen(nick);
+        if (nickLen > 64) nickLen = 64;  // Safety limit
+        packet[offset++] = nickLen;
+        memcpy(packet + offset, nick, nickLen);
+        offset += nickLen;
+
+        SendRawPacket(packet, offset, destAddr);
+        NET_LOG("-> Sent PLAYER_SPAWN for player %d (%s) to new client", playerId, nick);
+    }
+}
+
+void CNetServerAndroid::SendNewPlayerSpawnToExisting(ClientConnection& newPlayer)
+{
+    // Send PLAYER_SPAWN for the new player to all existing clients
+    // NOTE: Called while m_clientsMutex is already held by caller
+
+    // Build the spawn packet for the new player
     uint8_t packet[128];
     int offset = 0;
 
-    packet[offset++] = 0x18;  // PLAYER_SPAWN (24 in client's PacketID enum)
+    packet[offset++] = 0x18;  // PLAYER_SPAWN
 
-    // Player ID (2 bytes, little-endian)
-    uint16_t playerId = 1;  // TODO: Use actual player ID
+    // Player ID (2 bytes, little-endian) - use new player's actual ID
+    uint16_t playerId = newPlayer.gamePlayerId;
     packet[offset++] = playerId & 0xFF;
     packet[offset++] = (playerId >> 8) & 0xFF;
 
@@ -983,11 +1084,11 @@ void CNetServerAndroid::SendPlayerSpawn(ClientConnection& client)
     packet[offset++] = 0;
     packet[offset++] = 0;
 
-    // Team ID (2 bytes) - 0 = no team
+    // Team ID (2 bytes) - 0xFFFF = no team
     packet[offset++] = 0xFF;
     packet[offset++] = 0xFF;
 
-    // Position X (float, little-endian)
+    // Position (3 floats) - spawn position
     float posX = 2245.0f, posY = -1261.0f, posZ = 24.0f;
     memcpy(packet + offset, &posX, 4); offset += 4;
     memcpy(packet + offset, &posY, 4); offset += 4;
@@ -1005,47 +1106,62 @@ void CNetServerAndroid::SendPlayerSpawn(ClientConnection& client)
     float armor = 0.0f;
     memcpy(packet + offset, &armor, 4); offset += 4;
 
-    // Nickname length + nickname
-    const char* nick = "RemotePlayer";
+    // Nickname - use actual player name
+    const char* nick = newPlayer.playerName.empty() ? "Player" : newPlayer.playerName.c_str();
     uint8_t nickLen = strlen(nick);
+    if (nickLen > 64) nickLen = 64;  // Safety limit
     packet[offset++] = nickLen;
     memcpy(packet + offset, nick, nickLen);
     offset += nickLen;
 
-    sockaddr_in destAddr;
-    destAddr.sin_family = AF_INET;
-    destAddr.sin_addr.s_addr = htonl(client.playerID.GetBinaryAddress());
-    destAddr.sin_port = htons(client.playerID.GetPort());
+    // Send to all existing connected clients
+    for (auto& pair : m_clients)
+    {
+        ClientConnection& existingClient = pair.second;
 
-    SendRawPacket(packet, offset, destAddr);
-    NET_LOG("-> Sent PLAYER_SPAWN to client");
+        // Skip if not connected or if it's the new player itself
+        if (existingClient.state != ClientState::CONNECTED ||
+            existingClient.playerID == newPlayer.playerID)
+        {
+            continue;
+        }
+
+        sockaddr_in destAddr;
+        destAddr.sin_family = AF_INET;
+        destAddr.sin_addr.s_addr = htonl(existingClient.playerID.GetBinaryAddress());
+        destAddr.sin_port = htons(existingClient.playerID.GetPort());
+
+        SendRawPacket(packet, offset, destAddr);
+        NET_LOG("-> Sent PLAYER_SPAWN for new player %d (%s) to existing client %d",
+                playerId, nick, existingClient.gamePlayerId);
+    }
 }
 
 void CNetServerAndroid::NotifyPlayerJoined(ClientConnection& newPlayer)
 {
     // Send PLAYER_JOIN (0x03 = 3) to all existing clients
     // Format: playerId (16 bits), nickLen (8 bits), nick (N bytes)
-    // NOTE: Caller must NOT hold m_clientsMutex - we lock it here
+    // NOTE: Called while m_clientsMutex is already held by caller
 
     uint8_t packet[64];
     int offset = 0;
 
     packet[offset++] = 0x03;  // PLAYER_JOIN (3 in client's PacketID enum)
 
-    // Player ID (2 bytes)
-    uint16_t playerId = 2;  // New player's ID
+    // Player ID (2 bytes) - use actual player ID
+    uint16_t playerId = newPlayer.gamePlayerId;
     packet[offset++] = playerId & 0xFF;
     packet[offset++] = (playerId >> 8) & 0xFF;
 
-    // Nickname
-    const char* nick = "AndroidPlayer";
+    // Nickname - use actual player name
+    const char* nick = newPlayer.playerName.empty() ? "Player" : newPlayer.playerName.c_str();
     uint8_t nickLen = strlen(nick);
+    if (nickLen > 64) nickLen = 64;  // Safety limit
     packet[offset++] = nickLen;
     memcpy(packet + offset, nick, nickLen);
     offset += nickLen;
 
     // Send to all connected clients except the new one
-    // NOTE: No lock needed - called after lock is released
     for (auto& pair : m_clients)
     {
         if (pair.second.state == ClientState::CONNECTED &&
@@ -1057,50 +1173,53 @@ void CNetServerAndroid::NotifyPlayerJoined(ClientConnection& newPlayer)
             destAddr.sin_port = htons(pair.second.playerID.GetPort());
 
             SendRawPacket(packet, offset, destAddr);
-            NET_LOG("-> Sent PLAYER_JOIN notification to existing client");
+            NET_LOG("-> Sent PLAYER_JOIN for player %d (%s) to existing client", playerId, nick);
         }
     }
 }
 
 void CNetServerAndroid::SendExistingPlayersTo(ClientConnection& newPlayer)
 {
-    // Send PLAYER_LIST or PLAYER_JOIN for each existing player to the new client
-    // NOTE: No lock - called while m_clientsMutex is already held by caller
+    // Send PLAYER_JOIN for each existing player to the new client
+    // NOTE: Called while m_clientsMutex is already held by caller
 
-    int existingCount = 0;
+    sockaddr_in destAddr;
+    destAddr.sin_family = AF_INET;
+    destAddr.sin_addr.s_addr = htonl(newPlayer.playerID.GetBinaryAddress());
+    destAddr.sin_port = htons(newPlayer.playerID.GetPort());
+
     for (auto& pair : m_clients)
     {
-        if (pair.second.state == ClientState::CONNECTED &&
-            !(pair.second.playerID == newPlayer.playerID))
+        ClientConnection& existingClient = pair.second;
+
+        // Skip if not connected or if it's the new client itself
+        if (existingClient.state != ClientState::CONNECTED ||
+            existingClient.playerID == newPlayer.playerID)
         {
-            existingCount++;
-
-            // Send PLAYER_JOIN for this existing player
-            uint8_t packet[64];
-            int offset = 0;
-
-            packet[offset++] = 0x03;  // PLAYER_JOIN (3 in client's PacketID enum)
-
-            // Player ID
-            uint16_t playerId = existingCount;
-            packet[offset++] = playerId & 0xFF;
-            packet[offset++] = (playerId >> 8) & 0xFF;
-
-            // Nickname
-            const char* nick = "AndroidPlayer";
-            uint8_t nickLen = strlen(nick);
-            packet[offset++] = nickLen;
-            memcpy(packet + offset, nick, nickLen);
-            offset += nickLen;
-
-            sockaddr_in destAddr;
-            destAddr.sin_family = AF_INET;
-            destAddr.sin_addr.s_addr = htonl(newPlayer.playerID.GetBinaryAddress());
-            destAddr.sin_port = htons(newPlayer.playerID.GetPort());
-
-            SendRawPacket(packet, offset, destAddr);
-            NET_LOG("-> Sent existing player %d to new client", playerId);
+            continue;
         }
+
+        // Send PLAYER_JOIN for this existing player
+        uint8_t packet[64];
+        int offset = 0;
+
+        packet[offset++] = 0x03;  // PLAYER_JOIN (3 in client's PacketID enum)
+
+        // Player ID - use actual player ID
+        uint16_t playerId = existingClient.gamePlayerId;
+        packet[offset++] = playerId & 0xFF;
+        packet[offset++] = (playerId >> 8) & 0xFF;
+
+        // Nickname - use actual player name
+        const char* nick = existingClient.playerName.empty() ? "Player" : existingClient.playerName.c_str();
+        uint8_t nickLen = strlen(nick);
+        if (nickLen > 64) nickLen = 64;  // Safety limit
+        packet[offset++] = nickLen;
+        memcpy(packet + offset, nick, nickLen);
+        offset += nickLen;
+
+        SendRawPacket(packet, offset, destAddr);
+        NET_LOG("-> Sent existing player %d (%s) to new client", playerId, nick);
     }
 }
 

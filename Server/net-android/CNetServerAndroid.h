@@ -473,6 +473,7 @@ struct ClientConnection
     uint16_t            bitstreamVersion = 0x06B;  // Latest MTA version
     std::string         playerName;
     uint32_t            elementId = 0xFFFFFFFFu;
+    uint16_t            gamePlayerId = 0;          // Unique in-game player ID (1, 2, 3, ...)
 
     // Statistics
     uint64_t            packetsReceived = 0;
@@ -642,6 +643,7 @@ private:
                               ClientConnection& client);
     void SendJoinComplete(ClientConnection& client);
     void SendPlayerSpawn(ClientConnection& client);
+    void SendNewPlayerSpawnToExisting(ClientConnection& newPlayer);
     void NotifyPlayerJoined(ClientConnection& newPlayer);
     void SendExistingPlayersTo(ClientConnection& newPlayer);
     ClientConnection* GetClient(const NetServerPlayerID& playerID);
@@ -674,6 +676,7 @@ private:
 
     std::map<uint64_t, ClientConnection> m_clients;
     std::mutex              m_clientsMutex;
+    uint16_t                m_nextGamePlayerId = 1;  // Counter for assigning unique player IDs
 
     // Track latest port for each IP (to fix NAT port changes)
     std::map<uint32_t, uint16_t> m_ipToLatestPort;
