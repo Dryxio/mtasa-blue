@@ -1162,4 +1162,32 @@ Both paths needed to be patched for successful connection.
 
 ---
 
-*Document updated: January 15, 2026 - Session 36: deathmatch.so Binary Patching - CONNECTION SUCCESS!*
+## Session 37-40: Two-Player Visibility Working (January 15, 2026)
+
+**Goal:** Make two Android clients see each other in-game.
+
+**Key Fixes (Client):**
+- Added packet ID remap for non-standard PLAYER_SPAWN (0x18) during receive.
+- Implemented raw Android parsing for PLAYER_JOIN/PLAYER_SPAWN packets.
+- Fixed PURESYNC sender/receiver mismatch by writing compressed latency field.
+- Added deferred spawn path for PLAYER_SPAWN until local player is ready.
+- Added unique nicknames per client to avoid "Nick already in use".
+
+**Key Fixes (Server):**
+- Assigned unique gamePlayerId per client and used it consistently in JOIN/SPAwn.
+- Parsed playerName from JOINDATA and used in JOIN/SPAwn notifications.
+- Sent existing-player spawn to new client and new-player spawn to existing clients.
+- Set elementId on direct JOINED_GAME to enable SYNC BYPASS relays.
+- Guarded CNetBitStreamAndroid debug reads/writes to prevent crashes.
+
+**Result:**
+- Both Android devices connect and see each other as fully rendered peds.
+- PLAYER_JOIN/PLAYER_SPAWN and PURESYNC flow validated end-to-end.
+
+**Current State:**
+- Two-player visibility confirmed on Android.
+- Server stable with net_android.so (no crash in bitstream debug paths).
+
+---
+
+*Document updated: January 15, 2026 - Session 40: Two-Player Visibility Working*

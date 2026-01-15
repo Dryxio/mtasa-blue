@@ -1,8 +1,8 @@
 # MTA:SA Android Port - Project Summary
 
 > Document created: January 9, 2026
-> Last updated: January 15, 2026 (Session 36 - ANDROID CLIENT CONNECTED via deathmatch.so binary patching!)
-> Status: **Phase 7f - ANDROID CLIENT CONNECTED! All version checks bypassed. Ready for two-player visibility testing.**
+> Last updated: January 15, 2026 (Session 40 - TWO-PLAYER VISIBILITY WORKING)
+> Status: **Phase 7f - TWO-PLAYER VISIBILITY WORKING (Android-to-Android)**
 
 **Related Documentation:**
 - [Progress Log](MTA-ANDROID-PROGRESS-LOG.md) - Historical session logs and daily progress
@@ -19,7 +19,7 @@ This document summarizes the progress on porting MTA:SA (Multi Theft Auto: San A
 | GTA SA Definitive Edition | Unreal Engine 4 | Not feasible (95%+ rewrite) | Rejected |
 | **GTA SA Android** | **RenderWare** | **Feasible (40-60% rewrite)** | **In Progress** |
 
-**Current Status**: Phases 1-7e complete, Phase 7f - **ANDROID CLIENT CONNECTED! All version checks bypassed via deathmatch.so binary patching.**
+**Current Status**: Phases 1-7e complete, Phase 7f - **Two Android players connect and see each other in-game.**
 
 ```
 Build Status:    APK builds successfully (ARM64 + ARM32)
@@ -32,7 +32,7 @@ Server Module:   net_android.so deployed as net.so on VPS (Android-only; PC clie
 Full Protocol:   Handshake -> MOD_NAME -> JOINDATA -> JOIN_COMPLETE -> JOINED_GAME (WORKING!)
 Server:          deathmatch.so patched to bypass all version checks (4 binary patches)
 CONNECTION:      ANDROID CLIENT CONNECTED SUCCESSFULLY!
-NEXT:            Connect Device 2 and verify two-player visibility
+NEXT:            Stabilize sync, remove debug-only guards, and align server protocol with PC format
 
 === SESSION 36 (January 15, 2026) ===
 DEATHMATCH.SO BINARY PATCHING - ANDROID CLIENT CONNECTED!
@@ -72,6 +72,30 @@ DEATHMATCH.SO BINARY PATCHING - ANDROID CLIENT CONNECTED!
     1. Connect Device 2 and verify both players connect
     2. Test if players can see each other in-game
     3. Debug any remaining sync/visibility issues
+
+=== SESSION 40 (January 15, 2026) ===
+TWO-PLAYER VISIBILITY WORKING!
+
+  RESULTS:
+    - Two Android clients connect and see each other as full peds
+    - PLAYER_JOIN/PLAYER_SPAWN parsing fixed for Android raw packets
+    - PURESYNC sender/receiver alignment fixed (latency field added)
+    - Server assigns unique gamePlayerId and sends correct JOIN/SPAwn notifications
+    - elementId set on direct JOINED_GAME so sync relays work
+
+  CLIENT CHANGES:
+    - Remap non-standard PLAYER_SPAWN (0x18) during receive
+    - Raw parsing for PLAYER_JOIN/PLAYER_SPAWN
+    - Deferred spawn until local player ready (pending spawn stored)
+    - Unique nicknames to avoid "Nick already in use"
+
+  SERVER CHANGES:
+    - Unique player IDs + parsed playerName from JOINDATA
+    - Spawn existing -> new and new -> existing
+    - Bitstream debug guards to prevent crashes
+
+  CURRENT STATE:
+    - Two-player visibility confirmed on Android
 
 === SESSION 20 (January 11, 2026) ===
 CPed::Teleport FIX - Remote player position now stable!
