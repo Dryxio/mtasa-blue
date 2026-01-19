@@ -14,10 +14,14 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <android/log.h>
 #include "../hooks/ARMHookInstaller.h"
+#include "../network/SyncStructures.h"
+#include "../signatures/ARMAddressMap.h"
 
 namespace MTA::Android::Multiplayer
 {
@@ -91,6 +95,7 @@ namespace ARM64
 {
     // Global variable
     constexpr uintptr_t CWORLD_PLAYERINFOCUS = 0xBDCAE8;  // uint8_t
+    constexpr uintptr_t CPLACEABLE_MATRIX_PTR = 0x18;
 
     // CPad functions
     constexpr uintptr_t CPAD_GETPEDWALKLEFTRIGHT = 0x4DCD40;
@@ -156,6 +161,8 @@ public:
         {
             m_remotePlayerKeys[i].Reset();
             m_remotePedPtrs[i] = 0;
+            m_remotePlayerCameraRot[i] = 0.0f;
+            m_remotePlayerCameraValid[i] = false;
         }
 
         // Install hooks
@@ -220,6 +227,62 @@ public:
     }
 
     /**
+     * Update remote player camera rotation (radians).
+     */
+    void SetRemotePlayerCameraRotation(uint8_t playerSlot, float rotation)
+    {
+        if (playerSlot >= MAX_REMOTE_PLAYERS)
+            return;
+        m_remotePlayerCameraRot[playerSlot] = rotation;
+        m_remotePlayerCameraValid[playerSlot] = true;
+    }
+
+    void ClearRemotePlayerCameraRotation(uint8_t playerSlot)
+    {
+        if (playerSlot >= MAX_REMOTE_PLAYERS)
+            return;
+        m_remotePlayerCameraRot[playerSlot] = 0.0f;
+        m_remotePlayerCameraValid[playerSlot] = false;
+    }
+
+    /**
+     * Build controller state from captured local pad keys.
+     */
+    MTA::Android::Network::SControllerState GetLocalControllerState() const
+    {
+        MTA::Android::Network::SControllerState state;
+
+        state.LeftStickX = static_cast<int16_t>(std::clamp<int>(m_localPlayerKeys.wKeyLR, -128, 128));
+        // Invert Y axis: Android touch reports positive for forward, but PC/MTA expects negative for forward
+        state.LeftStickY = static_cast<int16_t>(-std::clamp<int>(m_localPlayerKeys.wKeyUD, -128, 128));
+
+        if (m_localPlayerKeys.bKeys[KEY_SPRINT])
+        {
+            state.ButtonCross = 255;
+        }
+
+        if (m_localPlayerKeys.bKeys[KEY_JUMP])
+        {
+            state.ButtonSquare = 255;
+        }
+
+        const int absX = std::abs(static_cast<int>(state.LeftStickX));
+        const int absY = std::abs(static_cast<int>(state.LeftStickY));
+        const int maxAxis = std::max(absX, absY);
+        if (m_localPlayerKeys.bKeys[KEY_WALK] || (!m_localPlayerKeys.bKeys[KEY_SPRINT] && maxAxis > 0 && maxAxis <= 64))
+        {
+            state.m_bPedWalk = 1;
+        }
+
+        return state;
+    }
+
+    /**
+     * Get local camera rotation (radians).
+     */
+    float GetLocalCameraRotation() const { return ReadCameraRotation(); }
+
+    /**
      * Get the current player being processed
      */
     uint8_t GetCurrentPlayer() const { return m_currentPlayer; }
@@ -257,6 +320,8 @@ private:
     PAD_KEYS m_localPlayerKeys;
     PAD_KEYS m_remotePlayerKeys[MAX_REMOTE_PLAYERS];
     uintptr_t m_remotePedPtrs[MAX_REMOTE_PLAYERS]{};
+    float m_remotePlayerCameraRot[MAX_REMOTE_PLAYERS]{};
+    bool m_remotePlayerCameraValid[MAX_REMOTE_PLAYERS]{};
 
     //=========================================================================
     // Original function pointers
@@ -277,6 +342,118 @@ private:
     static uint32_t Hook_JumpJustDown(uintptr_t thiz);
     static uint32_t Hook_GetJump(uintptr_t thiz);
     static void Hook_ProcessControl(uintptr_t thiz);
+
+    bool IsCamLogEnabled() const { return true; }
+
+    struct RwMatrix
+    {
+        float rightX, rightY, rightZ;
+        uint32_t flags;
+        float upX, upY, upZ;
+        uint32_t pad1;
+        float atX, atY, atZ;
+        uint32_t pad2;
+        float posX, posY, posZ;
+        uint32_t pad3;
+    };
+
+    float ReadCameraRotation() const
+    {
+#if defined(__aarch64__)
+        if (m_gameBase == 0)
+            return 0.0f;
+
+        uintptr_t cameraBase = m_gameBase + MTA::Android::ARM::ARM64::g_CCamera;
+        uintptr_t matrixPtr = *reinterpret_cast<uintptr_t*>(cameraBase + ARM64::CPLACEABLE_MATRIX_PTR);
+        if (matrixPtr == 0)
+            return 0.0f;
+
+        const RwMatrix* matrix = reinterpret_cast<const RwMatrix*>(matrixPtr);
+        const float rotation = atan2f(-matrix->atX, matrix->atY);
+
+        if (IsCamLogEnabled())
+        {
+            static int s_camLogCount = 0;
+            if (s_camLogCount < 50)
+            {
+                PAD_LOGI("CamRot local base=0x%lx matrix=0x%lx at=(%.3f,%.3f) rot=%.3f",
+                         (unsigned long)cameraBase,
+                         (unsigned long)matrixPtr,
+                         matrix->atX,
+                         matrix->atY,
+                         rotation);
+                ++s_camLogCount;
+            }
+        }
+
+        return rotation;
+#else
+        return 0.0f;
+#endif
+    }
+
+    void GetAdjustedRemoteStick(uint8_t playerSlot, int16_t& outX, int16_t& outY) const
+    {
+        const PAD_KEYS& keys = m_remotePlayerKeys[playerSlot];
+        float x = static_cast<float>(keys.wKeyLR);
+        float y = static_cast<float>(keys.wKeyUD);
+        const float rawX = x;
+        const float rawY = y;
+        float rotatedX = x;
+        float rotatedY = y;
+        float localCam = 0.0f;
+        float remoteCam = 0.0f;
+        float delta = 0.0f;
+        bool rotated = false;
+
+        if (m_remotePlayerCameraValid[playerSlot])
+        {
+            localCam = ReadCameraRotation();
+            remoteCam = m_remotePlayerCameraRot[playerSlot];
+            delta = remoteCam - localCam;
+            const float cosD = std::cos(delta);
+            const float sinD = std::sin(delta);
+            rotatedX = x * cosD - y * sinD;
+            rotatedY = x * sinD + y * cosD;
+            x = rotatedX;
+            y = rotatedY;
+            rotated = true;
+        }
+
+        if (keys.bKeys[KEY_WALK])
+        {
+            if (std::fabs(x) > 32.0f)
+                x = (x < 0.0f) ? -32.0f : 32.0f;
+            if (std::fabs(y) > 32.0f)
+                y = (y < 0.0f) ? -32.0f : 32.0f;
+        }
+
+        x = std::clamp(x, -128.0f, 127.0f);
+        y = std::clamp(y, -128.0f, 127.0f);
+        outX = static_cast<int16_t>(std::lround(x));
+        outY = static_cast<int16_t>(std::lround(y));
+
+        if (IsCamLogEnabled())
+        {
+            static int s_adjustLogCount = 0;
+            if (s_adjustLogCount < 200)
+            {
+                PAD_LOGI("CamAdjust slot=%u valid=%d local=%.3f remote=%.3f delta=%.3f raw=(%.1f,%.1f) rot=(%.1f,%.1f) out=(%d,%d)",
+                         playerSlot,
+                         rotated ? 1 : 0,
+                         localCam,
+                         remoteCam,
+                         delta,
+                         rawX,
+                         rawY,
+                         rotatedX,
+                         rotatedY,
+                         outX,
+                         outY);
+                ++s_adjustLogCount;
+            }
+        }
+    }
 
     // Friend declarations for hook access
     friend uint16_t Hook_GetPedWalkLeftRight(uintptr_t);
@@ -305,16 +482,10 @@ inline uint16_t CPadHooks::Hook_GetPedWalkLeftRight(uintptr_t thiz)
     if (playerInFocus > 0 && playerInFocus < MAX_REMOTE_PLAYERS)
     {
         // Remote player - return stored keys
-        PAD_KEYS& keys = hooks.m_remotePlayerKeys[playerInFocus];
-        int16_t result = keys.wKeyLR;
-
-        // Walking adjustment (from SA-MP)
-        if ((result == -128 || result == 128) && keys.bKeys[KEY_WALK])
-        {
-            result = 32;  // Reduced for walking
-        }
-
-        return static_cast<uint16_t>(result);
+        int16_t adjustedX = 0;
+        int16_t adjustedY = 0;
+        hooks.GetAdjustedRemoteStick(playerInFocus, adjustedX, adjustedY);
+        return static_cast<uint16_t>(adjustedX);
     }
     else
     {
@@ -333,16 +504,10 @@ inline uint16_t CPadHooks::Hook_GetPedWalkUpDown(uintptr_t thiz)
     if (playerInFocus > 0 && playerInFocus < MAX_REMOTE_PLAYERS)
     {
         // Remote player - return stored keys
-        PAD_KEYS& keys = hooks.m_remotePlayerKeys[playerInFocus];
-        int16_t result = keys.wKeyUD;
-
-        // Walking adjustment
-        if ((result == -128 || result == 128) && keys.bKeys[KEY_WALK])
-        {
-            result = 32;
-        }
-
-        return static_cast<uint16_t>(result);
+        int16_t adjustedX = 0;
+        int16_t adjustedY = 0;
+        hooks.GetAdjustedRemoteStick(playerInFocus, adjustedX, adjustedY);
+        return static_cast<uint16_t>(adjustedY);
     }
     else
     {
@@ -388,9 +553,7 @@ inline uint32_t CPadHooks::Hook_JumpJustDown(uintptr_t thiz)
     }
     else
     {
-        uint32_t result = s_CPad_JumpJustDown(thiz);
-        hooks.m_localPlayerKeys.bKeys[KEY_JUMP] = result != 0;
-        return result;
+        return s_CPad_JumpJustDown(thiz);
     }
 }
 

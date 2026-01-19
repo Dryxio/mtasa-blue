@@ -90,6 +90,7 @@ struct RemoteSyncData
     // Rotation
     float rotation;
     float targetRotation;
+    float cameraRotation;
 
     // Health/Armor
     uint8_t health;
@@ -119,7 +120,7 @@ struct RemoteSyncData
     uint16_t syncTimeContext;
 
     RemoteSyncData()
-        : rotation(0), targetRotation(0)
+        : rotation(0), targetRotation(0), cameraRotation(0)
         , health(100), armor(0)
         , weaponSlot(0), ammo(0)
         , isOnGround(true), isInWater(false)

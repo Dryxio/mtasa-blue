@@ -1,8 +1,8 @@
 # MTA:SA Android Port - Project Summary
 
 > Document created: January 9, 2026
-> Last updated: January 15, 2026 (Session 40 - TWO-PLAYER VISIBILITY WORKING)
-> Status: **Phase 7f - TWO-PLAYER VISIBILITY WORKING (Android-to-Android)**
+> Last updated: January 19, 2026 (Session 41 - Animation/Keysync Pipeline)
+> Status: **Phase 7h - ANIMATION/KEYSYNC PIPELINE (Walk/Run partially working)**
 
 **Related Documentation:**
 - [Progress Log](MTA-ANDROID-PROGRESS-LOG.md) - Historical session logs and daily progress
@@ -19,7 +19,7 @@ This document summarizes the progress on porting MTA:SA (Multi Theft Auto: San A
 | GTA SA Definitive Edition | Unreal Engine 4 | Not feasible (95%+ rewrite) | Rejected |
 | **GTA SA Android** | **RenderWare** | **Feasible (40-60% rewrite)** | **In Progress** |
 
-**Current Status**: Phases 1-7e complete, Phase 7f - **Two Android players connect and see each other in-game.**
+**Current Status**: Phases 1-7f complete, Phase 7h - **Animation/Keysync pipeline in progress. Walk/run animations partially working, intermittent backward animation issue under investigation.**
 
 ```
 Build Status:    APK builds successfully (ARM64 + ARM32)
@@ -32,7 +32,7 @@ Server Module:   net_android.so deployed as net.so on VPS (Android-only; PC clie
 Full Protocol:   Handshake -> MOD_NAME -> JOINDATA -> JOIN_COMPLETE -> JOINED_GAME (WORKING!)
 Server:          deathmatch.so patched to bypass all version checks (4 binary patches)
 CONNECTION:      ANDROID CLIENT CONNECTED SUCCESSFULLY!
-NEXT:            Stabilize sync, remove debug-only guards, and align server protocol with PC format
+NEXT:            Fix intermittent backward animation, investigate spawn rotation desync
 
 === SESSION 36 (January 15, 2026) ===
 DEATHMATCH.SO BINARY PATCHING - ANDROID CLIENT CONNECTED!
@@ -72,6 +72,39 @@ DEATHMATCH.SO BINARY PATCHING - ANDROID CLIENT CONNECTED!
     1. Connect Device 2 and verify both players connect
     2. Test if players can see each other in-game
     3. Debug any remaining sync/visibility issues
+
+=== SESSION 41 (January 19, 2026) ===
+PHASE 7h: ANIMATION/KEYSYNC PIPELINE
+
+  GOAL:
+    - Replace derived velocity-based input with real controller state
+    - Fix remote player animations (walk/run/jump)
+
+  IMPLEMENTED:
+    - GetLocalControllerState() in CPadHooks.h - captures real pad input
+    - Replaced BuildControllerFromVelocity() with real input in SendPlayerSync()
+    - Fixed JumpJustDown edge-trigger (removed write, uses GetJump held state)
+    - Added SetRemotePlayerKeys() call in CPlayerManager::Process()
+    - Fixed walk reduction sign bug (-128 was becoming +32, now preserves sign)
+
+  RESULTS:
+    - Walk/run animations partially working
+    - Remote players animate instead of sliding
+
+  REMAINING ISSUES:
+    - Intermittent backward animation (direction flips sometimes)
+    - Wrong rotation on initial spawn (separate issue)
+    - Possible causes: data race on m_localPlayerKeys, rotation/keysync timing mismatch
+
+  FILES CHANGED:
+    - Client/android/multiplayer/CPadHooks.h
+    - Client/android/network/CServerConnection.cpp
+    - Client/android/multiplayer/CPlayerManager.h
+
+  NEXT STEPS:
+    - Investigate backward animation root cause
+    - Add debug logging for LeftStickY and rotation
+    - Consider snapshot mechanism for m_localPlayerKeys if race condition
 
 === SESSION 40 (January 15, 2026) ===
 TWO-PLAYER VISIBILITY WORKING!
@@ -522,62 +555,26 @@ grep "CPlayerPed" "Client/android/reference/samp-android-reference/dumps_libGTAS
 
 ## 7. Next Steps
 
-### Phase 7f Status: Bitstream Framing Regression
-Multiple packets are misparsed (PURESYNC, PlayerList, PlayerSpawn) after bitstream changes; remote players not visible.
+### Phase 7h: Remote Animation + Keysync Pipeline
+Two-player visibility and basic position sync are working. The next major work is to make remote players animate correctly (walk/run/jump/aim/fire) instead of sliding idle.
 
-### Completed Investigation Steps
-- [x] Added detailed PURESYNC probes (offsets, raw bytes, field offsets).
-- [x] Removed forced 3-bit offset in `CServerConnection` (no change in decoding).
-- [x] Added 16-bit ElementID compat read in packet handler (IDs still wrong).
-- [x] Confirmed server write order matches PC (PlayerID → timeContext → latency → keysync → flags → position → rotation → health/armor → cam).
-- [ ] Identify framing/bit-order mismatch affecting multiple packets.
+**Priority 1: Send Real Local Controller State**
+- Replace derived input in `BuildControllerFromVelocity` with actual local controller state captured from hooks.
+- Wire real keysync fields into `SendPlayerSync` so remote peers receive jump/aim/fire/crouch signals.
+- Verify packet contents match PC ordering (timeContext → latency → keysync → flags → position → rotation → health/armor → camera).
 
-### Next: Phase 7f - Framing Fix
-Priority is to correct packet framing/bit order before resuming animation/CPad work.
+**Priority 2: Apply Controller State to Remote Peds**
+- Confirm `CPed::ProcessControl` runs for remote peds and pulls the injected keys.
+- Ensure `SetRemotePlayerPed` and `SetRemotePlayerKeys` are called consistently in `CPlayerManager::Process`.
+- Add minimal on-screen logging to verify hook activity when a remote ped animates.
 
-**Priority 1: Bitstream Alignment Fix**
-- Verify NetBitStream bit order vs PC `bitstream.h::ReadBits` (LSB/MSB and bit significance).
-- Cross-check ElementID bitcount and endianness in Android NetBitStream vs PC.
-- Capture one raw PURESYNC payload and decode using PC bitstream to confirm expected values.
+**Priority 3: Port PC-Side Animation/Task Rules**
+- Mirror key parts of `CNetAPI::ReadPlayerPuresync` logic for anim/aim/weapon states.
+- Implement additional flags (ducking, weapon aim, reload, stealth) and apply to remote ped tasks.
 
-**Priority 2: CPad Hooks for Remote Player Input (Paused)**
-
-SA-MP hooks CPad functions to provide input for remote players.
-This enables walking/running/jumping animations for remote players.
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| CPadHooks.h infrastructure | ✅ Complete | All hooks implemented |
-| ARM64 addresses mapped | ✅ Complete | 20+ CPad functions |
-| Key storage in RemoteSyncData | ✅ Added | leftStickX/Y, keyFlags |
-| Slot management (2-31) | ✅ Working | For PlayerInFocus routing |
-| Hook installation | ✅ Enabled | Dead pose regression resolved |
-| Key extraction from packets | ❌ Missing | Needs PC ReadFullKeysync port |
-| ProcessControl hook | ⚠️ In progress | Needs real keysync data for correct anim |
-
-**Files:**
-- `Client/android/multiplayer/CPadHooks.h` - Full implementation (disabled)
-- `Client/android/multiplayer/CPlayerManager.h` - Integration (commented out)
-
-**ARM64 Addresses (CPadHooks.h):**
-```cpp
-CWORLD_PLAYERINFOCUS     = 0xBDCAE8  // Which player is being processed
-CPAD_GETPEDWALKLEFTRIGHT = 0x4DCD40
-CPAD_GETPEDWALKUPDOWN    = 0x4DCDD4
-CPAD_GETSPRINT           = 0x4DF100
-CPAD_GETJUMP             = 0x4DEF14
-```
-
-**To Enable:**
-1. Debug why CPadHooks caused dead pose regression
-2. Fix hook installation timing/order
-3. Implement FindPlayerNumFromPedPtr for ProcessControl
-4. Extract proper key data from PURESYNC packets
-
-**Priority 2: Weapon Sync**
-- Sync current weapon between players
-- Show correct weapon model on remote players
-- Weapon fire sync
+**After Animations:**
+- Weapon sync (current slot, ammo, firing events).
+- Vehicle sync (driver/passenger, entering/exiting, vehicle puresync).
 
 **Priority 3: Animation Sync**
 - Sync animation states (running, jumping, etc.)

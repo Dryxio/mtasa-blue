@@ -1520,11 +1520,27 @@ void CPacketHandler::Packet_PlayerPureSync(NetBitStream& bitStream)
     if (controllerState.RightShoulder1) keyFlags |= 0x0080;  // KEY_HANDBRAKE/AIM
     if (controllerState.m_bPedWalk)    keyFlags |= 0x0400;   // KEY_WALK
 
+    static int s_camLogCount = 0;
+    if (s_camLogCount < 200)
+    {
+        LOGD("PURESYNC[%u] camRot=%.3f pedRot=%.3f pos=(%.1f,%.1f) stick=(%u,%u) keyFlags=0x%04X",
+             playerId,
+             camRotation.rotation,
+             rotationSync.rotation,
+             position.x,
+             position.y,
+             leftStickX,
+             leftStickY,
+             keyFlags);
+        ++s_camLogCount;
+    }
+
     // Build sync data for player manager
     Multiplayer::RemoteSyncData syncData;
     syncData.position = Multiplayer::CVector3D(position.x, position.y, position.z);
     syncData.velocity = Multiplayer::CVector3D(velocitySync.x, velocitySync.y, velocitySync.z);
     syncData.rotation = rotationSync.rotation;
+    syncData.cameraRotation = camRotation.rotation;
     syncData.health = health;
     syncData.armor = armor;
     syncData.weaponSlot = weaponSlot;

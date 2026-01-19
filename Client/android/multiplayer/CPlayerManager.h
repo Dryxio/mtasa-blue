@@ -456,6 +456,7 @@ inline void CPlayerManager::RemovePlayer(uint32_t playerId)
         {
             padHooks.SetRemotePlayerPed(slot, 0);
             padHooks.SetRemotePlayerKeys(slot, 128, 128, 0);
+            padHooks.ClearRemotePlayerCameraRotation(slot);
         }
     }
 
@@ -669,6 +670,7 @@ inline void CPlayerManager::UpdatePlayerSync(uint32_t playerId, const RemoteSync
                 padData.controllerLeftStickX,
                 padData.controllerLeftStickY,
                 padData.keyFlags);
+            padHooks.SetRemotePlayerCameraRotation(slot, padData.cameraRotation);
         }
     }
 }
@@ -764,7 +766,16 @@ inline void CPlayerManager::Process()
                 auto slotIt = m_playerToSlot.find(pair.first);
                 if (slotIt != m_playerToSlot.end())
                 {
-                    padHooks.SetRemotePlayerPed(slotIt->second, player->GetPedPtr());
+                    const uint8_t slot = slotIt->second;
+                    padHooks.SetRemotePlayerPed(slot, player->GetPedPtr());
+
+                    const RemoteSyncData& padData = player->GetSyncData();
+                    padHooks.SetRemotePlayerKeys(
+                        slot,
+                        padData.controllerLeftStickX,
+                        padData.controllerLeftStickY,
+                        padData.keyFlags);
+                    padHooks.SetRemotePlayerCameraRotation(slot, padData.cameraRotation);
                 }
             }
         }

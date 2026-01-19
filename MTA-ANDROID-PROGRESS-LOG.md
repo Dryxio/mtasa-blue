@@ -172,6 +172,16 @@
 | 2026-01-11 | 7f | Remote players now teleport correctly and stay at their position |
 | 2026-01-12 | 7f | Added derived input fallback for remote animations (temporary) |
 | 2026-01-12 | 7f | Animation/heading mismatch identified; need PC keysync/heading rules |
+| 2026-01-19 | 7h | **Phase 7h Started**: Animation/Keysync Pipeline |
+| 2026-01-19 | 7h | Created TEMP-ANIMATION-KEYSYNC-NOTES.md - implementation plan |
+| 2026-01-19 | 7h | Added GetLocalControllerState() to CPadHooks.h - real input capture |
+| 2026-01-19 | 7h | Replaced BuildControllerFromVelocity() with real pad input in SendPlayerSync |
+| 2026-01-19 | 7h | Fixed JumpJustDown edge-trigger - now uses GetJump (held) for sync |
+| 2026-01-19 | 7h | Added SetRemotePlayerKeys() call in CPlayerManager::Process() |
+| 2026-01-19 | 7h | Fixed walk reduction sign bug (was losing sign: -128 became +32) |
+| 2026-01-19 | 7h | **RESULT**: Walk/run animations partially working |
+| 2026-01-19 | 7h | **ISSUE**: Intermittent backward animation still occurs (investigating) |
+| 2026-01-19 | 7h | **ISSUE**: Wrong rotation on initial spawn (separate from anim issue) |
 
 ---
 
@@ -1189,5 +1199,13 @@ Both paths needed to be patched for successful connection.
 - Server stable with net_android.so (no crash in bitstream debug paths).
 
 ---
+
+## Next Major Steps (Phase 7h)
+
+**Goal:** Remote players animate correctly (walk/run/jump/aim/fire), not just slide/idle.
+
+1. Send real controller state (keysync) instead of derived velocity.
+2. Verify CPad hooks drive remote peds during `CPed::ProcessControl`.
+3. Port MTA PC animation/task rules for remote peds (aiming, weapon states, crouch).
 
 *Document updated: January 15, 2026 - Session 40: Two-Player Visibility Working*

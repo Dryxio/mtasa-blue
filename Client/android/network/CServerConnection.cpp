@@ -6,6 +6,7 @@
 
 #include "CServerConnection.h"
 #include "SyncStructures.h"
+#include "../multiplayer/CPadHooks.h"
 #include <android/log.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -1298,8 +1299,17 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     // Latency (compressed uint16_t) - receiver expects this field
     bitStream->WriteCompressed(static_cast<uint16_t>(0));
 
-    // Controller state (derived from movement for now)
-    SControllerState controller = BuildControllerFromVelocity(vx, vy, rotation);
+    // Controller state from real pad input if available, else fallback to derived movement.
+    SControllerState controller;
+    auto& padHooks = MTA::Android::Multiplayer::CPadHooks::GetInstance();
+    if (padHooks.IsInitialized())
+    {
+        controller = padHooks.GetLocalControllerState();
+    }
+    else
+    {
+        controller = BuildControllerFromVelocity(vx, vy, rotation);
+    }
     WriteFullKeysync(controller, *bitStream);
 
     // Player puresync flags (PC format)
@@ -1348,12 +1358,18 @@ void CServerConnection::SendPlayerSync(float x, float y, float z, float rotation
     bitStream->Write(static_cast<uint8_t>(0));
 
     // Camera rotation (12-bit)
+    float cameraRotation = rotation;
+    if (padHooks.IsInitialized())
+    {
+        cameraRotation = padHooks.GetLocalCameraRotation();
+    }
+
     SPcCameraRotationSync camRot;
-    camRot.rotation = rotation;
+    camRot.rotation = cameraRotation;
     camRot.Write(*bitStream);
 
     // Camera orientation (PC format expects this after camera rotation)
-    WriteCameraOrientationPlaceholder(*bitStream, rotation);
+    WriteCameraOrientationPlaceholder(*bitStream, cameraRotation);
 
     // Send packet directly via our socket (not through CNetAndroid which has a separate socket)
     if (m_socket >= 0)
