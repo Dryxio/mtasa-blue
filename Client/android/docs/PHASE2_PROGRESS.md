@@ -30,7 +30,7 @@ Phase 2 focuses on mapping x86 Windows addresses to ARM Android addresses using 
 
 ### 1. GTA-Reversed Analysis ✅
 
-Location: `/Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed`
+Location: `/Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio`
 
 **Structure discovered:**
 ```
@@ -194,12 +194,12 @@ For ARM address resolution, we need byte patterns. These can be derived from:
 
 ```bash
 # Find function by x86 address
-grep -r "// 0x534310" /Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed/source/
+grep -r "// 0x534310" /Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio/source/
 
 # Result: game_sa/Entity/Entity.cpp - CEntity::Render
 
 # Get function signature
-grep -A20 "CEntity::Render" /Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed/source/game_sa/Entity/Entity.h
+grep -A20 "CEntity::Render" /Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio/source/game_sa/Entity/Entity.h
 ```
 
 ### Key GTA-Reversed files for MTA hooks:

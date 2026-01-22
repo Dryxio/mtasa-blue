@@ -540,7 +540,7 @@ SetModelIndex must be called from the main game thread. Currently called from ne
 | **SA-MP ARM64 Symbol Dump** | `Client/android/reference/samp-android-reference/dumps_libGTASA_32and64/DUMP 2.1 (64).txt` | ~20,000+ symbols with ARM64 addresses |
 | **SA-MP Android Reference** | `Client/android/reference/samp-android-reference/` | Full SA-MP Android source - working multiplayer |
 | **MTA PC Source (game_sa)** | `Client/game_sa/` | MTA's PC game layer - ped creation approach |
-| **GTA-Reversed (PC)** | `/Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed` | 90%+ reversed GTA:SA PC |
+| **GTA-Reversed (PC)** | `/Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio` | 90%+ reversed GTA:SA PC |
 
 ### How to Search ARM64 Addresses
 
@@ -602,7 +602,7 @@ Two-player visibility and basic position sync are working. The next major work i
 | MTA:SA Blue | `/Users/salimtrouve/Documents/GitHub/mtasa-blue` | Main codebase |
 | MTA Android | `Client/android/` | Android port |
 | SA-MP Reference | `Client/android/reference/samp-android-reference/` | ARM addresses |
-| GTA-Reversed | `/Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed` | 90% reversed GTA:SA |
+| GTA-Reversed | `/Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio` | 90% reversed GTA:SA |
 
 ### Development Environment
 
