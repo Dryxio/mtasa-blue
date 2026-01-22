@@ -10,7 +10,7 @@
  *   3. Update ARM addresses as they are discovered
  *
  * Reference:
- *   - GTA-Reversed: /Users/salimtrouve/Documents/GitHub/mta-misc/gta-reversed
+ *   - GTA-Reversed: /Users/salimtrouve/Documents/GitHub/gta-reversed-dryxio
  *   - MTA hooks: /Users/salimtrouve/Documents/GitHub/mtasa-blue/Client/multiplayer_sa
  */
 
